@@ -219,6 +219,7 @@ class LWPM_I18n {
 			'dropzone_title' => __( 'Drag & drop your site archive (.zip) here', 'liberty-wp-migrator' ),
 			'dropzone_sub' => __( 'or click to browse — supports multi-GB archives via automatic chunked upload', 'liberty-wp-migrator' ),
 			'select_file_btn' => __( 'Choose .zip Archive', 'liberty-wp-migrator' ),
+			/* translators: %s: formatted maximum server upload size (e.g. 2 MB). */
 			'server_limit_note' => __( 'Standard server upload limit: %s — bypassed automatically via chunked upload.', 'liberty-wp-migrator' ),
 			'warning_overwrite_title' => __( 'Important Notice Before Importing', 'liberty-wp-migrator' ),
 			'warning_overwrite_desc' => __( 'Importing an archive will replace this site’s database, themes, plugins, and media files with the contents of the archive. Back up first if needed.', 'liberty-wp-migrator' ),
@@ -264,6 +265,7 @@ class LWPM_I18n {
 			'sched_time_label' => __( 'Preferred Run Time (Site Timezone)', 'liberty-wp-migrator' ),
 			'sched_retention_label' => __( 'Scheduled Backup Retention Limit', 'liberty-wp-migrator' ),
 			'ret_unlimited' => __( 'Keep All Backups (Unlimited)', 'liberty-wp-migrator' ),
+			/* translators: %d: number of scheduled backups to retain. */
 			'ret_keep_n' => __( 'Keep Last %d Scheduled Backups', 'liberty-wp-migrator' ),
 			'sched_exclusions_title' => __( 'Scheduled Backup Content Rules', 'liberty-wp-migrator' ),
 			'sched_notify_label' => __( 'Send email notification when a scheduled backup completes', 'liberty-wp-migrator' ),
