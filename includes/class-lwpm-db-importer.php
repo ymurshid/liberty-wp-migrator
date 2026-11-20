@@ -163,8 +163,8 @@ class LWPM_DB_Importer {
 		$shadow_table = $state['shadow_map'][ $src_table ]['shadow'];
 
 		if ( 'create_table' === $op ) {
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-			$wpdb->query( 'DROP TABLE IF EXISTS ' . LWPM_DB_Exporter::quote_ident( $shadow_table ) );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $shadow_table ) );
 
 			$rewritten = self::replace_first_table_ident( $sql, $src_table, $shadow_table );
 
@@ -190,11 +190,11 @@ class LWPM_DB_Importer {
 				);
 			}
 
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Executing validated CREATE TABLE statement from site archive into shadow table.
 			$res = $wpdb->query( $rewritten );
 			if ( false === $res ) {
 				$no_fk = preg_replace( '/,\s*(?:CONSTRAINT\s+`[^`]+`\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+`[^`]+`\s*\([^)]+\)(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET NULL|RESTRICT|NO ACTION))*/i', '', $rewritten );
-				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Fallback shadow table DDL without foreign keys.
 				$res2 = $wpdb->query( $no_fk );
 				if ( false === $res2 ) {
 					return new WP_Error(
@@ -209,7 +209,7 @@ class LWPM_DB_Importer {
 
 		if ( 'insert' === $op ) {
 			$rewritten = self::replace_first_table_ident( $sql, $src_table, $shadow_table );
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Executing framed bulk INSERT statement into isolated shadow table.
 			$res = $wpdb->query( $rewritten );
 			if ( false === $res ) {
 				return new WP_Error(
@@ -282,7 +282,7 @@ class LWPM_DB_Importer {
 				$query  = "SELECT {$col_sql} FROM {$esc_table} LIMIT {$offset}, 200";
 			}
 
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Keyset pagination over shadow table columns during search & replace.
 			$rows = $wpdb->get_results( $query, ARRAY_A );
 
 			if ( empty( $rows ) ) {
@@ -352,11 +352,11 @@ class LWPM_DB_Importer {
 		// 1. Update table prefix keys in options & usermeta when source and destination prefixes differ.
 		if ( '' !== $source_prefix && $source_prefix !== $dest_prefix ) {
 			if ( isset( $shadow_by_suffix['options'] ) ) {
-				$opt_tbl = LWPM_DB_Exporter::quote_ident( $shadow_by_suffix['options'] );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 				$wpdb->query(
 					$wpdb->prepare(
-						// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-						"UPDATE {$opt_tbl} SET `option_name` = %s WHERE `option_name` = %s",
+						'UPDATE %i SET `option_name` = %s WHERE `option_name` = %s',
+						$shadow_by_suffix['options'],
 						$dest_prefix . 'user_roles',
 						$source_prefix . 'user_roles'
 					)
@@ -364,13 +364,13 @@ class LWPM_DB_Importer {
 			}
 
 			if ( isset( $shadow_by_suffix['usermeta'] ) ) {
-				$um_tbl   = LWPM_DB_Exporter::quote_ident( $shadow_by_suffix['usermeta'] );
 				$src_len  = strlen( $source_prefix ) + 1;
 				$like_pat = $wpdb->esc_like( $source_prefix ) . '%';
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 				$wpdb->query(
 					$wpdb->prepare(
-						// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-						"UPDATE {$um_tbl} SET `meta_key` = CONCAT(%s, SUBSTRING(`meta_key`, %d)) WHERE `meta_key` LIKE %s",
+						'UPDATE %i SET `meta_key` = CONCAT(%s, SUBSTRING(`meta_key`, %d)) WHERE `meta_key` LIKE %s',
+						$shadow_by_suffix['usermeta'],
 						$dest_prefix,
 						$src_len,
 						$like_pat
@@ -382,13 +382,14 @@ class LWPM_DB_Importer {
 		// 2. Enforce destination siteurl & home, keep Liberty WP Migrator active, clear builder caches.
 		if ( isset( $shadow_by_suffix['options'] ) ) {
 			$opt_shadow = $shadow_by_suffix['options'];
-			$opt_tbl    = LWPM_DB_Exporter::quote_ident( $opt_shadow );
 
 			$wpdb->update( $opt_shadow, array( 'option_value' => $state['dest_info']['site_url'] ), array( 'option_name' => 'siteurl' ) );
 			$wpdb->update( $opt_shadow, array( 'option_value' => $state['dest_info']['home_url'] ), array( 'option_name' => 'home' ) );
 
-			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-			$active_raw = $wpdb->get_var( "SELECT `option_value` FROM {$opt_tbl} WHERE `option_name` = 'active_plugins' LIMIT 1" );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$active_raw = $wpdb->get_var(
+				$wpdb->prepare( 'SELECT `option_value` FROM %i WHERE `option_name` = %s LIMIT 1', $opt_shadow, 'active_plugins' )
+			);
 			$active_arr = is_string( $active_raw ) ? @unserialize( $active_raw, array( 'allowed_classes' => false ) ) : array();
 			if ( ! is_array( $active_arr ) ) {
 				$active_arr = array();
@@ -405,14 +406,27 @@ class LWPM_DB_Importer {
 				array( 'option_name' => 'active_plugins' )
 			);
 
-			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-			$wpdb->query( "DELETE FROM {$opt_tbl} WHERE `option_name` IN ('_elementor_global_css', 'elementor_css_print_method_cache')" );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->query(
+				$wpdb->prepare(
+					'DELETE FROM %i WHERE `option_name` IN (%s, %s)',
+					$opt_shadow,
+					'_elementor_global_css',
+					'elementor_css_print_method_cache'
+				)
+			);
 		}
 
 		if ( isset( $shadow_by_suffix['postmeta'] ) ) {
-			$pm_tbl = LWPM_DB_Exporter::quote_ident( $shadow_by_suffix['postmeta'] );
-			// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-			$wpdb->query( "DELETE FROM {$pm_tbl} WHERE `meta_key` IN ('_elementor_css', '_et_builder_module_features_cache')" );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+			$wpdb->query(
+				$wpdb->prepare(
+					'DELETE FROM %i WHERE `meta_key` IN (%s, %s)',
+					$shadow_by_suffix['postmeta'],
+					'_elementor_css',
+					'_et_builder_module_features_cache'
+				)
+			);
 		}
 
 		// 3. Optional: Preserve current logged-in Administrator account.
@@ -446,8 +460,8 @@ class LWPM_DB_Importer {
 			$final  = $info['final'];
 
 			if ( isset( $views_set[ $final ] ) ) {
-				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-				$wpdb->query( 'DROP VIEW IF EXISTS ' . LWPM_DB_Exporter::quote_ident( $final ) );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$wpdb->query( $wpdb->prepare( 'DROP VIEW IF EXISTS %i', $final ) );
 			}
 
 			if ( isset( $existing_set[ $final ] ) ) {
@@ -462,19 +476,19 @@ class LWPM_DB_Importer {
 
 		if ( ! empty( $rename_clauses ) ) {
 			if ( ! empty( $old_drops ) ) {
-				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Dropping internal temporary rotation tables.
 				$wpdb->query( 'DROP TABLE IF EXISTS ' . implode( ', ', $old_drops ) );
 			}
 
 			$rename_sql = 'RENAME TABLE ' . implode( ', ', $rename_clauses );
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Atomic RENAME TABLE swap across validated shadow tables.
 			$swap_ok = $wpdb->query( $rename_sql );
 			if ( false === $swap_ok ) {
 				return new WP_Error( 'atomic_swap_failed', 'Atomic RENAME TABLE failed: ' . $wpdb->last_error );
 			}
 
 			if ( ! empty( $old_drops ) ) {
-				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Dropping rotated old tables after successful swap.
 				$wpdb->query( 'DROP TABLE IF EXISTS ' . implode( ', ', $old_drops ) );
 			}
 		}
@@ -482,10 +496,9 @@ class LWPM_DB_Importer {
 		// 5. Recreate deferred Views.
 		if ( ! empty( $state['deferred_views'] ) ) {
 			foreach ( $state['deferred_views'] as $v ) {
-				$esc_v = LWPM_DB_Exporter::quote_ident( $v['view_name'] );
-				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-				$wpdb->query( "DROP VIEW IF EXISTS {$esc_v}" );
-				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$wpdb->query( $wpdb->prepare( 'DROP VIEW IF EXISTS %i', $v['view_name'] ) );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Recreating validated view definition from archive.
 				$wpdb->query( $v['sql'] );
 			}
 		}
@@ -505,13 +518,11 @@ class LWPM_DB_Importer {
 			return null;
 		}
 
-		$u_tbl  = LWPM_DB_Exporter::quote_ident( $users_shadow );
-		$um_tbl = LWPM_DB_Exporter::quote_ident( $usermeta_shadow );
-
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$existing_id = $wpdb->get_var(
 			$wpdb->prepare(
-				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				"SELECT `ID` FROM {$u_tbl} WHERE `user_login` = %s LIMIT 1",
+				'SELECT `ID` FROM %i WHERE `user_login` = %s LIMIT 1',
+				$users_shadow,
 				$admin_data['user_login']
 			)
 		);
@@ -549,10 +560,11 @@ class LWPM_DB_Importer {
 		$level_key = $dest_prefix . 'user_level';
 		$caps_val  = serialize( array( 'administrator' => true ) );
 
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$has_cap = $wpdb->get_var(
 			$wpdb->prepare(
-				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				"SELECT `umeta_id` FROM {$um_tbl} WHERE `user_id` = %d AND `meta_key` = %s LIMIT 1",
+				'SELECT `umeta_id` FROM %i WHERE `user_id` = %d AND `meta_key` = %s LIMIT 1',
+				$usermeta_shadow,
 				$target_id,
 				$cap_key
 			)
@@ -570,10 +582,11 @@ class LWPM_DB_Importer {
 			);
 		}
 
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$has_lvl = $wpdb->get_var(
 			$wpdb->prepare(
-				// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-				"SELECT `umeta_id` FROM {$um_tbl} WHERE `user_id` = %d AND `meta_key` = %s LIMIT 1",
+				'SELECT `umeta_id` FROM %i WHERE `user_id` = %d AND `meta_key` = %s LIMIT 1',
+				$usermeta_shadow,
 				$target_id,
 				$level_key
 			)
@@ -600,12 +613,11 @@ class LWPM_DB_Importer {
 	private static function inspect_shadow_table_for_sr( $shadow_table, $skip_guid = false ) {
 		global $wpdb;
 
-		$esc       = LWPM_DB_Exporter::quote_ident( $shadow_table );
 		$text_cols = array();
 		$int_cols  = array();
 
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$cols = $wpdb->get_results( "SHOW COLUMNS FROM {$esc}", ARRAY_A );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$cols = $wpdb->get_results( $wpdb->prepare( 'SHOW COLUMNS FROM %i', $shadow_table ), ARRAY_A );
 		if ( is_array( $cols ) ) {
 			foreach ( $cols as $c ) {
 				$name = (string) $c['Field'];
@@ -625,8 +637,8 @@ class LWPM_DB_Importer {
 		}
 
 		$pk_cols = array();
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$keys = $wpdb->get_results( "SHOW KEYS FROM {$esc} WHERE Key_name = 'PRIMARY'", ARRAY_A );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$keys = $wpdb->get_results( $wpdb->prepare( 'SHOW KEYS FROM %i WHERE Key_name = %s', $shadow_table, 'PRIMARY' ), ARRAY_A );
 		if ( is_array( $keys ) ) {
 			foreach ( $keys as $k ) {
 				$pk_cols[] = (string) $k['Column_name'];
@@ -676,7 +688,7 @@ class LWPM_DB_Importer {
 
 		$esc_table = LWPM_DB_Exporter::quote_ident( $shadow_table );
 		$sql       = "UPDATE {$esc_table} SET " . implode( ', ', $set_parts ) . ' WHERE ' . implode( ' AND ', $where_parts ) . ' LIMIT 1';
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- PK-less custom table fallback update with escaped values.
 		$wpdb->query( $sql );
 	}
 

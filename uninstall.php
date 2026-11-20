@@ -43,7 +43,7 @@ function lwpm_uninstall_rrmdir( $dir ) {
 		if ( is_dir( $path ) && ! is_link( $path ) ) {
 			lwpm_uninstall_rrmdir( $path );
 		} else {
-			@unlink( $path );
+			wp_delete_file( $path );
 		}
 	}
 	@rmdir( $dir );

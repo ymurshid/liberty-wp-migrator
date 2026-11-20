@@ -3,21 +3,22 @@
  * Plugin Name:       Liberty WP Migrator
  * Plugin URI:        https://github.com/ymurshid/liberty-wp-migrator
  * Description:       Enterprise-grade WordPress migration, manual backup, and automated scheduled backup plugin by LibertyDev. Unlimited-size streaming ZIP export/import with serialization-safe domain & path replacement.
- * Version:           1.1.0
- * Requires at least: 5.6
+ * Version:           1.2.0
+ * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            LibertyDev
  * Author URI:        https://github.com/ymurshid
  * License:           GPL v2 or later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       liberty-wp-migrator
+ * Domain Path:       /languages
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'LWPM_VERSION', '1.1.0' );
+define( 'LWPM_VERSION', '1.2.0' );
 define( 'LWPM_PLUGIN_FILE', __FILE__ );
 define( 'LWPM_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 define( 'LWPM_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
@@ -235,13 +236,12 @@ final class Liberty_WP_Migrator {
 			return;
 		}
 
-		status_header( 503 );
 		header( 'Retry-After: 120' );
-		header( 'Content-Type: text/html; charset=utf-8' );
-		echo '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Site Maintenance</title>';
-		echo '<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0B1524;color:#F8FAFC;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px;text-align:center}.box{background:#10243C;border:1px solid rgba(224,112,32,.35);padding:40px;border-radius:16px;box-shadow:0 20px 40px rgba(0,0,0,.35);max-width:480px}h1{font-size:22px;margin:0 0 12px;color:#F8FAFC}p{color:#94A3B8;line-height:1.6;margin:0}</style></head>';
-		echo '<body><div class="box"><h1>Briefly Unavailable for Scheduled Maintenance</h1><p>We are currently updating the site. Please check back in a moment.<br>الموقع في وضع التحديث حالياً، يرجى المحاولة بعد لحظات.</p></div></body></html>';
-		exit;
+		wp_die(
+			esc_html__( 'We are currently updating the site. Please check back in a moment. — الموقع في وضع التحديث حالياً، يرجى المحاولة بعد لحظات.', 'liberty-wp-migrator' ),
+			esc_html__( 'Briefly Unavailable for Scheduled Maintenance', 'liberty-wp-migrator' ),
+			array( 'response' => 503 )
+		);
 	}
 
 	/**

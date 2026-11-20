@@ -35,7 +35,7 @@ jobs:
       - name: Build installable WordPress plugin ZIP
         run: |
           mkdir -p build/liberty-wp-migrator
-          rsync -av --exclude='build' --exclude='dist' --exclude='.git' --exclude='.github' --exclude='.gitignore' ./ build/liberty-wp-migrator/
+          rsync -av --exclude='build' --exclude='dist' --exclude='.git' --exclude='.github' --exclude='.gitignore' --exclude='.distignore' --exclude='.wordpress-org' --exclude='README.md' ./ build/liberty-wp-migrator/
           cd build
           zip -r ../liberty-wp-migrator.zip liberty-wp-migrator
       - name: Create GitHub Release

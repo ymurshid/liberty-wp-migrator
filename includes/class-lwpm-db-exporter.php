@@ -157,7 +157,7 @@ class LWPM_DB_Exporter {
 				$query     = "SELECT * FROM {$esc_table} {$where_sql} LIMIT {$offset}, " . self::SELECT_BATCH_SIZE;
 			}
 
-			// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Dynamic table dump query using validated schema identifiers and integer keyset cursor.
 			$rows = $wpdb->get_results( $query, ARRAY_A );
 
 			if ( empty( $rows ) ) {
@@ -218,13 +218,13 @@ class LWPM_DB_Exporter {
 	private static function emit_table_schema_and_inspect( $fp, $table_name, $has_prefix, $suffix ) {
 		global $wpdb;
 
-		$esc_table = self::quote_ident( $table_name );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$create_row = $wpdb->get_row( "SHOW CREATE TABLE {$esc_table}", ARRAY_N );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$create_row = $wpdb->get_row( $wpdb->prepare( 'SHOW CREATE TABLE %i', $table_name ), ARRAY_N );
 		if ( ! is_array( $create_row ) || empty( $create_row[1] ) ) {
 			return new WP_Error( 'show_create_failed', 'Failed reading schema for table: ' . $table_name );
 		}
 
+		$esc_table  = self::quote_ident( $table_name );
 		$create_sql = rtrim( trim( (string) $create_row[1] ), ';' ) . ';';
 		$drop_sql   = "DROP TABLE IF EXISTS {$esc_table};";
 
@@ -235,8 +235,8 @@ class LWPM_DB_Exporter {
 			return new WP_Error( 'sql_write_failed', 'Failed writing CREATE TABLE for: ' . $table_name );
 		}
 
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$cols     = $wpdb->get_results( "SHOW COLUMNS FROM {$esc_table}", ARRAY_A );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$cols     = $wpdb->get_results( $wpdb->prepare( 'SHOW COLUMNS FROM %i', $table_name ), ARRAY_A );
 		$col_meta = array();
 		$int_cols = array();
 
@@ -260,8 +260,8 @@ class LWPM_DB_Exporter {
 			}
 		}
 
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$pk_rows = $wpdb->get_results( "SHOW KEYS FROM {$esc_table} WHERE Key_name = 'PRIMARY'", ARRAY_A );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$pk_rows = $wpdb->get_results( $wpdb->prepare( 'SHOW KEYS FROM %i WHERE Key_name = %s', $table_name, 'PRIMARY' ), ARRAY_A );
 		$pk_col  = null;
 		if ( is_array( $pk_rows ) && 1 === count( $pk_rows ) ) {
 			$candidate = (string) $pk_rows[0]['Column_name'];
@@ -359,8 +359,8 @@ class LWPM_DB_Exporter {
 		global $wpdb;
 
 		$esc_view = self::quote_ident( $view_name );
-		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		$row = $wpdb->get_row( "SHOW CREATE VIEW {$esc_view}", ARRAY_N );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		$row = $wpdb->get_row( $wpdb->prepare( 'SHOW CREATE VIEW %i', $view_name ), ARRAY_N );
 		if ( ! is_array( $row ) || empty( $row[1] ) ) {
 			return true;
 		}

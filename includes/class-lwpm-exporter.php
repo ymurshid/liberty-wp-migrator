@@ -112,10 +112,6 @@ class LWPM_Exporter {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function run_tick( $job_id, $time_budget = 0.0 ) {
-		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 120 );
-		}
-
 		$job_dir = LWPM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
 			return $job_dir;
@@ -244,11 +240,11 @@ class LWPM_Exporter {
 
 			if ( ! @rename( $zip_part, $final_zip ) ) {
 				if ( ! @copy( $zip_part, $final_zip ) ) {
-					@unlink( $zip_part );
+					wp_delete_file( $zip_part );
 					LWPM_Storage::delete_job( $job_id );
 					return new WP_Error( 'zip_rename_failed', 'Failed moving finalized archive into backups directory.' );
 				}
-				@unlink( $zip_part );
+				wp_delete_file( $zip_part );
 			}
 
 			$meta_file = substr( $final_zip, 0, -4 ) . '.meta.json';
@@ -391,7 +387,7 @@ class LWPM_Exporter {
 			}
 
 			$state['db_archived'] = true;
-			@unlink( $sql_path );
+			wp_delete_file( $sql_path );
 
 			if ( microtime( true ) >= $deadline ) {
 				return false;
@@ -508,7 +504,7 @@ class LWPM_Exporter {
 		if ( ! empty( $state['backup_filename'] ) ) {
 			$part = LWPM_Storage::get_backups_dir() . '/' . $state['backup_filename'] . '.part';
 			if ( file_exists( $part ) ) {
-				@unlink( $part );
+				wp_delete_file( $part );
 			}
 		}
 	}

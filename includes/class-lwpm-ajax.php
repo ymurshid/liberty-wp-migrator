@@ -334,11 +334,6 @@ class LWPM_Ajax {
 			wp_die( 'Backup archive not found.', 'Not Found', array( 'response' => 404 ) );
 		}
 
-		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 0 );
-		}
-		@ini_set( 'zlib.output_compression', 'Off' );
-
 		while ( ob_get_level() > 0 ) {
 			@ob_end_clean();
 		}
@@ -371,8 +366,12 @@ class LWPM_Ajax {
 		$length = ( $size > 0 ) ? ( $end - $start + 1 ) : 0;
 		header( 'Content-Length: ' . $length );
 
-		$fp = @fopen( $filepath, 'rb' );
-		if ( ! $fp ) {
+		$fp  = @fopen( $filepath, 'rb' );
+		$out = @fopen( 'php://output', 'wb' );
+		if ( ! $fp || ! $out ) {
+			if ( $fp ) {
+				fclose( $fp );
+			}
 			exit;
 		}
 		if ( $start > 0 ) {
@@ -385,11 +384,12 @@ class LWPM_Ajax {
 			if ( false === $buf || '' === $buf ) {
 				break;
 			}
-			echo $buf; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+			fwrite( $out, $buf );
 			flush();
 			$remaining -= strlen( $buf );
 		}
 
+		fclose( $out );
 		fclose( $fp );
 		exit;
 	}

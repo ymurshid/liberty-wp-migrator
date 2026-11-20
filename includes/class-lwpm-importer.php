@@ -294,10 +294,6 @@ class LWPM_Importer {
 	 * Execute one time-boxed Import tick.
 	 */
 	public static function run_tick( $job_id ) {
-		if ( function_exists( 'set_time_limit' ) ) {
-			@set_time_limit( 120 );
-		}
-
 		$job_dir = LWPM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
 			delete_option( 'lwpm_maintenance_active' );
@@ -353,7 +349,7 @@ class LWPM_Importer {
 			}
 
 			if ( true === $db_res ) {
-				@unlink( $sql_file );
+				wp_delete_file( $sql_file );
 				$state['phase'] = 'search_replace';
 				$pct            = 76;
 			} else {
@@ -426,7 +422,7 @@ class LWPM_Importer {
 				$css_files = glob( $elementor_css_dir . '/*.css' );
 				if ( is_array( $css_files ) ) {
 					foreach ( $css_files as $cf ) {
-						@unlink( $cf );
+						wp_delete_file( $cf );
 					}
 				}
 			}
@@ -669,8 +665,8 @@ class LWPM_Importer {
 			$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 0' );
 			foreach ( $state['shadow_map'] as $info ) {
 				if ( ! empty( $info['shadow'] ) ) {
-					// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-					$wpdb->query( 'DROP TABLE IF EXISTS ' . LWPM_DB_Exporter::quote_ident( $info['shadow'] ) );
+					// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+					$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $info['shadow'] ) );
 				}
 			}
 			$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 1' );

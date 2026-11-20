@@ -194,10 +194,10 @@ class LWPM_Storage {
 
 		if ( ! @rename( $tmp, $target ) ) {
 			if ( @copy( $tmp, $target ) ) {
-				@unlink( $tmp );
+				wp_delete_file( $tmp );
 				return true;
 			}
-			@unlink( $tmp );
+			wp_delete_file( $tmp );
 			return false;
 		}
 
@@ -266,7 +266,7 @@ class LWPM_Storage {
 			if ( is_dir( $path ) && ! is_link( $path ) ) {
 				self::rrmdir( $path );
 			} else {
-				@unlink( $path );
+				wp_delete_file( $path );
 			}
 		}
 		@rmdir( $dir );
@@ -303,7 +303,7 @@ class LWPM_Storage {
 			foreach ( $parts as $part_file ) {
 				$mt = (int) @filemtime( $part_file );
 				if ( $mt > 0 && $mt < $cutoff ) {
-					@unlink( $part_file );
+					wp_delete_file( $part_file );
 				}
 			}
 		}
@@ -475,9 +475,10 @@ class LWPM_Storage {
 		}
 		$meta_file = substr( $filepath, 0, -4 ) . '.meta.json';
 		if ( file_exists( $meta_file ) ) {
-			@unlink( $meta_file );
+			wp_delete_file( $meta_file );
 		}
-		if ( ! @unlink( $filepath ) ) {
+		wp_delete_file( $filepath );
+		if ( file_exists( $filepath ) ) {
 			return new WP_Error( 'delete_failed', 'Could not delete backup file from disk.' );
 		}
 		return true;

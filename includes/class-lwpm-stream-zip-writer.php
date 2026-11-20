@@ -306,7 +306,7 @@ class LWPM_Stream_Zip_Writer {
 		if ( false === $deflate_ctx ) {
 			fclose( $src );
 			fclose( $dst );
-			@unlink( $tmp_deflated );
+			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'deflate_init_failed', 'Could not initialize raw deflate stream.' );
 		}
 
@@ -318,7 +318,7 @@ class LWPM_Stream_Zip_Writer {
 			if ( false === $chunk ) {
 				fclose( $src );
 				fclose( $dst );
-				@unlink( $tmp_deflated );
+				wp_delete_file( $tmp_deflated );
 				return new WP_Error( 'src_read_failed', 'Failed reading source chunk.' );
 			}
 			$len = strlen( $chunk );
@@ -329,7 +329,7 @@ class LWPM_Stream_Zip_Writer {
 				if ( false === $out || ( '' !== $out && false === self::fwrite_all( $dst, $out ) ) ) {
 					fclose( $src );
 					fclose( $dst );
-					@unlink( $tmp_deflated );
+					wp_delete_file( $tmp_deflated );
 					return new WP_Error( 'deflate_write_failed', 'Failed writing deflated stream.' );
 				}
 				$comp_size += strlen( $out );
@@ -340,7 +340,7 @@ class LWPM_Stream_Zip_Writer {
 		if ( false === $tail || ( '' !== $tail && false === self::fwrite_all( $dst, $tail ) ) ) {
 			fclose( $src );
 			fclose( $dst );
-			@unlink( $tmp_deflated );
+			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'deflate_finish_failed', 'Failed finalizing deflated stream.' );
 		}
 		$comp_size += strlen( $tail );
@@ -353,12 +353,12 @@ class LWPM_Stream_Zip_Writer {
 
 		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $fp ) {
-			@unlink( $tmp_deflated );
+			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive.' );
 		}
 		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
 			fclose( $fp );
-			@unlink( $tmp_deflated );
+			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
 		}
 
@@ -366,14 +366,14 @@ class LWPM_Stream_Zip_Writer {
 		$local_header  = self::build_local_file_header( $entry_name, 8, $mtime, $crc_le4, $comp_size, $actual_uncomp );
 		if ( false === self::fwrite_all( $fp, $local_header ) ) {
 			fclose( $fp );
-			@unlink( $tmp_deflated );
+			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'zip_write_failed', 'Failed writing local header.' );
 		}
 
 		$def_in = @fopen( $tmp_deflated, 'rb' );
 		if ( ! $def_in ) {
 			fclose( $fp );
-			@unlink( $tmp_deflated );
+			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'tmp_reopen_failed', 'Failed reopening deflated temp stream.' );
 		}
 
@@ -383,7 +383,7 @@ class LWPM_Stream_Zip_Writer {
 				if ( false === self::fwrite_all( $fp, $buf ) ) {
 					fclose( $def_in );
 					fclose( $fp );
-					@unlink( $tmp_deflated );
+					wp_delete_file( $tmp_deflated );
 					return new WP_Error( 'zip_copy_failed', 'Failed copying deflated stream into archive.' );
 				}
 			}
@@ -391,7 +391,7 @@ class LWPM_Stream_Zip_Writer {
 
 		fclose( $def_in );
 		fclose( $fp );
-		@unlink( $tmp_deflated );
+		wp_delete_file( $tmp_deflated );
 
 		$zip_offset = $header_offset + strlen( $local_header ) + $comp_size;
 
