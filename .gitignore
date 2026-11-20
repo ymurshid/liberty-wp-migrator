@@ -1,0 +1,11 @@
+# Local build / release artifacts
+/dist/
+*.zip.part
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log

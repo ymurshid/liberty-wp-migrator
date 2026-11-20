@@ -1,0 +1,45 @@
+name: Validate & Package Plugin Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  php-lint:
+    name: PHP Syntax Check (${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['7.4', '8.1', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+      - name: Lint all PHP files
+        run: find . -name "*.php" -not -path "./vendor/*" -print0 | xargs -0 -n1 php -l
+
+  release-zip:
+    name: Build & Publish liberty-wp-migrator.zip
+    needs: php-lint
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build installable WordPress plugin ZIP
+        run: |
+          mkdir -p build/liberty-wp-migrator
+          rsync -av --exclude='build' --exclude='dist' --exclude='.git' --exclude='.github' --exclude='.gitignore' ./ build/liberty-wp-migrator/
+          cd build
+          zip -r ../liberty-wp-migrator.zip liberty-wp-migrator
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: liberty-wp-migrator.zip
+          generate_release_notes: true
