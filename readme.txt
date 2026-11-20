@@ -1,5 +1,5 @@
 === Liberty WP Migrator ===
-Contributors: ymurshid
+Contributors: yassermurshid
 Tags: migration, backup, clone, restore, transfer
 Requires at least: 6.2
 Tested up to: 7.1
