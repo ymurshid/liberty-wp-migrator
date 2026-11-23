@@ -1,13 +1,16 @@
 <?php
 /**
- * Pure-PHP Resumable Append-Only Streaming ZIP / ZIP64 Writer — Liberty WP Migrator.
+ * Pure-PHP Resumable Append-Only Streaming ZIP / ZIP64 Writer — LibertyDev Site Migrator.
+ *
+ * Uses PHP-exit-guarded central_dir.php metadata log and supports skipping leading guard bytes
+ * when streaming temporary database.sql.php dumps into standard ZIP entries.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_Stream_Zip_Writer {
+class LDSM_Stream_Zip_Writer {
 
 	/**
 	 * Extensions that are already compressed; stored with method 0 (STORE) for maximum speed.
@@ -60,7 +63,7 @@ class LWPM_Stream_Zip_Writer {
 	 * Convert Unix timestamp into DOS time & date integers.
 	 *
 	 * @param int $mtime Unix modification timestamp.
-	 * @return array{0:int,1:int} [dos_time, dos_date]
+	 * @return array{0:int,1:int}
 	 */
 	public static function unix_to_dos_datetime( $mtime ) {
 		$ts       = max( 315532800, (int) $mtime );
@@ -74,14 +77,14 @@ class LWPM_Stream_Zip_Writer {
 	 * Append an in-memory string entry (e.g. manifest.json) to the streaming ZIP archive.
 	 *
 	 * @param string $zip_path   Path to .zip.part file.
-	 * @param string $cd_jsonl   Path to central_dir.jsonl metadata log.
+	 * @param string $cd_php     Path to PHP-guarded central_dir.php metadata log.
 	 * @param int    $zip_offset Current write offset in .zip.part (updated by reference).
 	 * @param string $entry_name Internal ZIP path.
 	 * @param string $content    Raw string bytes.
 	 * @param int    $mtime      Optional Unix timestamp.
 	 * @return true|WP_Error
 	 */
-	public static function add_from_string( $zip_path, $cd_jsonl, &$zip_offset, $entry_name, $content, $mtime = 0 ) {
+	public static function add_from_string( $zip_path, $cd_php, &$zip_offset, $entry_name, $content, $mtime = 0 ) {
 		$entry_name  = self::sanitize_entry_name( $entry_name );
 		$mtime       = $mtime > 0 ? (int) $mtime : time();
 		$uncomp_size = strlen( $content );
@@ -99,12 +102,14 @@ class LWPM_Stream_Zip_Writer {
 		}
 		$comp_size = strlen( $comp_data );
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming random-offset binary archive I/O requires native file pointers.
 		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
 		}
 
 		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'zip_seek_failed', 'Failed seeking to ZIP archive offset.' );
 		}
@@ -113,15 +118,17 @@ class LWPM_Stream_Zip_Writer {
 		$local_header  = self::build_local_file_header( $entry_name, $method, $mtime, $crc_le4, $comp_size, $uncomp_size );
 
 		if ( false === self::fwrite_all( $fp, $local_header ) || ( $comp_size > 0 && false === self::fwrite_all( $fp, $comp_data ) ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'zip_write_failed', 'Disk write failed while writing archive entry: ' . $entry_name );
 		}
 
 		$zip_offset = $header_offset + strlen( $local_header ) + $comp_size;
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		return self::record_central_dir_entry(
-			$cd_jsonl,
+			$cd_php,
 			array(
 				'name'        => $entry_name,
 				'method'      => $method,
@@ -138,35 +145,38 @@ class LWPM_Stream_Zip_Writer {
 	/**
 	 * Add or continue streaming a file from disk into the .zip.part archive.
 	 *
-	 * @param string     $zip_path    Path to .zip.part file.
-	 * @param string     $cd_jsonl    Path to central_dir.jsonl metadata log.
-	 * @param int        $zip_offset  Current end offset in .zip.part (updated by reference).
-	 * @param string     $source_path Absolute file path on disk.
-	 * @param string     $entry_name  Relative path inside the ZIP archive.
-	 * @param array|null $partial     Active partial-file transfer state (updated by reference).
-	 * @param float      $deadline    Unix microtime deadline for this tick.
-	 * @return bool|WP_Error True if file finished, false if paused mid-file for next tick, or WP_Error.
+	 * @param string     $zip_path           Path to .zip.part file.
+	 * @param string     $cd_php             Path to PHP-guarded central_dir.php metadata log.
+	 * @param int        $zip_offset         Current end offset in .zip.part (updated by reference).
+	 * @param string     $source_path        Absolute file path on disk.
+	 * @param string     $entry_name         Relative path inside the ZIP archive.
+	 * @param array|null $partial            Active partial-file transfer state (updated by reference).
+	 * @param float      $deadline           Unix microtime deadline for this tick.
+	 * @param int        $skip_leading_bytes Optional leading PHP guard bytes to skip from $source_path.
+	 * @return bool|WP_Error
 	 */
-	public static function add_file_chunked( $zip_path, $cd_jsonl, &$zip_offset, $source_path, $entry_name, &$partial, $deadline ) {
+	public static function add_file_chunked( $zip_path, $cd_php, &$zip_offset, $source_path, $entry_name, &$partial, $deadline, $skip_leading_bytes = 0 ) {
 		$entry_name = self::sanitize_entry_name( $entry_name );
+		$skip_bytes = max( 0, (int) $skip_leading_bytes );
 
-		if ( ! is_file( $source_path ) || ! is_readable( $source_path ) ) {
+		if ( ! is_file( $source_path ) || is_link( $source_path ) || ! is_readable( $source_path ) ) {
 			$partial = null;
 			return true;
 		}
 
 		if ( is_array( $partial ) && isset( $partial['entry_name'] ) && $partial['entry_name'] === $entry_name ) {
-			return self::continue_large_store_file( $zip_path, $cd_jsonl, $zip_offset, $source_path, $partial, $deadline );
+			return self::continue_large_store_file( $zip_path, $cd_php, $zip_offset, $source_path, $partial, $deadline );
 		}
 
 		clearstatcache( true, $source_path );
-		$uncomp_size = (int) @filesize( $source_path );
-		$mtime       = (int) @filemtime( $source_path );
+		$raw_file_size = (int) @filesize( $source_path );
+		$uncomp_size   = max( 0, $raw_file_size - $skip_bytes );
+		$mtime         = (int) @filemtime( $source_path );
 		if ( $mtime <= 0 ) {
 			$mtime = time();
 		}
 
-		$ext           = strtolower( (string) pathinfo( $source_path, PATHINFO_EXTENSION ) );
+		$ext           = strtolower( (string) pathinfo( $entry_name, PATHINFO_EXTENSION ) );
 		$already_compr = isset( self::$store_extensions[ $ext ] );
 
 		if ( $uncomp_size <= 6 * 1024 * 1024 ) {
@@ -174,6 +184,9 @@ class LWPM_Stream_Zip_Writer {
 			if ( false === $raw ) {
 				$partial = null;
 				return true;
+			}
+			if ( $skip_bytes > 0 ) {
+				$raw = ( strlen( $raw ) > $skip_bytes ) ? substr( $raw, $skip_bytes ) : '';
 			}
 			$actual_len = strlen( $raw );
 			$crc_hex    = hash( 'crc32b', $raw );
@@ -192,11 +205,13 @@ class LWPM_Stream_Zip_Writer {
 			unset( $raw );
 			$comp_size = strlen( $comp_data );
 
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 			$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 			if ( ! $fp ) {
 				return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
 			}
 			if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
 			}
@@ -205,16 +220,18 @@ class LWPM_Stream_Zip_Writer {
 			$local_header  = self::build_local_file_header( $entry_name, $method, $mtime, $crc_le4, $comp_size, $actual_len );
 
 			if ( false === self::fwrite_all( $fp, $local_header ) || ( $comp_size > 0 && false === self::fwrite_all( $fp, $comp_data ) ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_write_failed', 'Failed writing entry to ZIP archive: ' . $entry_name );
 			}
 			unset( $comp_data );
 			$zip_offset = $header_offset + strlen( $local_header ) + $comp_size;
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 
 			$partial = null;
 			$rec     = self::record_central_dir_entry(
-				$cd_jsonl,
+				$cd_php,
 				array(
 					'name'        => $entry_name,
 					'method'      => $method,
@@ -230,26 +247,27 @@ class LWPM_Stream_Zip_Writer {
 		}
 
 		if ( ! $already_compr && $uncomp_size <= 96 * 1024 * 1024 && function_exists( 'deflate_init' ) && function_exists( 'deflate_add' ) ) {
-			$res = self::stream_deflate_medium_file( $zip_path, $cd_jsonl, $zip_offset, $source_path, $entry_name, $uncomp_size, $mtime );
+			$res = self::stream_deflate_medium_file( $zip_path, $cd_php, $zip_offset, $source_path, $entry_name, $mtime, $skip_bytes );
 			if ( ! is_wp_error( $res ) ) {
 				$partial = null;
 				return true;
 			}
 		}
 
-		$crc_hex = @hash_file( 'crc32b', $source_path );
+		$crc_hex = self::compute_stream_crc32_hex( $source_path, $skip_bytes );
 		if ( false === $crc_hex ) {
 			$partial = null;
 			return true;
 		}
-		$crc_hex = str_pad( $crc_hex, 8, '0', STR_PAD_LEFT );
 		$crc_le4 = strrev( (string) hex2bin( $crc_hex ) );
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
 		}
 		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
 		}
@@ -258,45 +276,82 @@ class LWPM_Stream_Zip_Writer {
 		$local_header  = self::build_local_file_header( $entry_name, 0, $mtime, $crc_le4, $uncomp_size, $uncomp_size );
 
 		if ( false === self::fwrite_all( $fp, $local_header ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'zip_write_failed', 'Failed writing local header for large file: ' . $entry_name );
 		}
 
 		$zip_offset = $header_offset + strlen( $local_header );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		$partial = array(
 			'entry_name'    => $entry_name,
 			'header_offset' => $header_offset,
 			'uncomp_size'   => $uncomp_size,
+			'skip_bytes'    => $skip_bytes,
 			'bytes_copied'  => 0,
 			'mtime'         => $mtime,
 			'crc_hex'       => $crc_hex,
 		);
 
-		return self::continue_large_store_file( $zip_path, $cd_jsonl, $zip_offset, $source_path, $partial, $deadline );
+		return self::continue_large_store_file( $zip_path, $cd_php, $zip_offset, $source_path, $partial, $deadline );
 	}
 
 	/**
-	 * Stream-compress a 6 MB – 96 MB text/SQL file using PHP's incremental deflate_init in 1 MB RAM chunks.
+	 * Compute 8-char CRC32b hex of $source_path starting at $skip_bytes using zero-RAM streaming.
 	 *
-	 * @param string $zip_path    Path to .zip.part.
-	 * @param string $cd_jsonl    Path to central_dir.jsonl.
-	 * @param int    $zip_offset  Current write offset (updated by reference).
-	 * @param string $source_path Source file path.
-	 * @param string $entry_name  Internal ZIP path.
-	 * @param int    $uncomp_size File size in bytes.
-	 * @param int    $mtime       Modification timestamp.
-	 * @return true|WP_Error
+	 * @param string $source_path File path.
+	 * @param int    $skip_bytes  Leading bytes to skip.
+	 * @return string|false
 	 */
-	private static function stream_deflate_medium_file( $zip_path, $cd_jsonl, &$zip_offset, $source_path, $entry_name, $uncomp_size, $mtime ) {
+	private static function compute_stream_crc32_hex( $source_path, $skip_bytes = 0 ) {
+		if ( 0 === $skip_bytes ) {
+			$h = @hash_file( 'crc32b', $source_path );
+			return false !== $h ? str_pad( $h, 8, '0', STR_PAD_LEFT ) : false;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$fp = @fopen( $source_path, 'rb' );
+		if ( ! $fp ) {
+			return false;
+		}
+		if ( 0 !== @fseek( $fp, $skip_bytes, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			fclose( $fp );
+			return false;
+		}
+		$ctx = hash_init( 'crc32b' );
+		while ( ! feof( $fp ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+			$buf = fread( $fp, 1024 * 1024 );
+			if ( false !== $buf && '' !== $buf ) {
+				hash_update( $ctx, $buf );
+			}
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		fclose( $fp );
+		return str_pad( hash_final( $ctx ), 8, '0', STR_PAD_LEFT );
+	}
+
+	/**
+	 * Stream-compress a 6 MB – 96 MB text/SQL file in 1 MB RAM chunks.
+	 */
+	private static function stream_deflate_medium_file( $zip_path, $cd_php, &$zip_offset, $source_path, $entry_name, $mtime, $skip_bytes = 0 ) {
 		$tmp_deflated = $zip_path . '.deflate.tmp';
-		$src          = @fopen( $source_path, 'rb' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$src = @fopen( $source_path, 'rb' );
 		if ( ! $src ) {
 			return new WP_Error( 'src_open_failed', 'Cannot open source file for deflate.' );
 		}
+		if ( $skip_bytes > 0 && 0 !== @fseek( $src, $skip_bytes, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			fclose( $src );
+			return new WP_Error( 'src_seek_failed', 'Cannot seek past guard header.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$dst = @fopen( $tmp_deflated, 'wb' );
 		if ( ! $dst ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			return new WP_Error( 'tmp_open_failed', 'Cannot open temp deflate buffer.' );
 		}
@@ -304,7 +359,9 @@ class LWPM_Stream_Zip_Writer {
 		$deflate_ctx = @deflate_init( ZLIB_ENCODING_RAW, array( 'level' => 6 ) );
 		$hash_ctx    = hash_init( 'crc32b' );
 		if ( false === $deflate_ctx ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $dst );
 			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'deflate_init_failed', 'Could not initialize raw deflate stream.' );
@@ -314,9 +371,12 @@ class LWPM_Stream_Zip_Writer {
 		$comp_size     = 0;
 
 		while ( ! feof( $src ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$chunk = fread( $src, 1024 * 1024 );
 			if ( false === $chunk ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $src );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $dst );
 				wp_delete_file( $tmp_deflated );
 				return new WP_Error( 'src_read_failed', 'Failed reading source chunk.' );
@@ -327,7 +387,9 @@ class LWPM_Stream_Zip_Writer {
 				hash_update( $hash_ctx, $chunk );
 				$out = deflate_add( $deflate_ctx, $chunk, ZLIB_NO_FLUSH );
 				if ( false === $out || ( '' !== $out && false === self::fwrite_all( $dst, $out ) ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $src );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $dst );
 					wp_delete_file( $tmp_deflated );
 					return new WP_Error( 'deflate_write_failed', 'Failed writing deflated stream.' );
@@ -338,25 +400,31 @@ class LWPM_Stream_Zip_Writer {
 
 		$tail = deflate_add( $deflate_ctx, '', ZLIB_FINISH );
 		if ( false === $tail || ( '' !== $tail && false === self::fwrite_all( $dst, $tail ) ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $dst );
 			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'deflate_finish_failed', 'Failed finalizing deflated stream.' );
 		}
 		$comp_size += strlen( $tail );
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $src );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $dst );
 
 		$crc_hex = str_pad( hash_final( $hash_ctx ), 8, '0', STR_PAD_LEFT );
 		$crc_le4 = strrev( (string) hex2bin( $crc_hex ) );
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $fp ) {
 			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive.' );
 		}
 		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
@@ -365,23 +433,29 @@ class LWPM_Stream_Zip_Writer {
 		$header_offset = $zip_offset;
 		$local_header  = self::build_local_file_header( $entry_name, 8, $mtime, $crc_le4, $comp_size, $actual_uncomp );
 		if ( false === self::fwrite_all( $fp, $local_header ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'zip_write_failed', 'Failed writing local header.' );
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$def_in = @fopen( $tmp_deflated, 'rb' );
 		if ( ! $def_in ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			wp_delete_file( $tmp_deflated );
 			return new WP_Error( 'tmp_reopen_failed', 'Failed reopening deflated temp stream.' );
 		}
 
 		while ( ! feof( $def_in ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$buf = fread( $def_in, 1024 * 1024 );
 			if ( false !== $buf && '' !== $buf ) {
 				if ( false === self::fwrite_all( $fp, $buf ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $def_in );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					wp_delete_file( $tmp_deflated );
 					return new WP_Error( 'zip_copy_failed', 'Failed copying deflated stream into archive.' );
@@ -389,14 +463,16 @@ class LWPM_Stream_Zip_Writer {
 			}
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $def_in );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 		wp_delete_file( $tmp_deflated );
 
 		$zip_offset = $header_offset + strlen( $local_header ) + $comp_size;
 
 		return self::record_central_dir_entry(
-			$cd_jsonl,
+			$cd_php,
 			array(
 				'name'        => $entry_name,
 				'method'      => 8,
@@ -412,32 +488,30 @@ class LWPM_Stream_Zip_Writer {
 
 	/**
 	 * Continue copying bytes of a large STORE-mode file across ticks.
-	 *
-	 * @param string $zip_path    Path to .zip.part.
-	 * @param string $cd_jsonl    Path to central_dir.jsonl.
-	 * @param int    $zip_offset  Current write offset (updated by reference).
-	 * @param string $source_path Source file path.
-	 * @param array  $partial     Partial state (updated by reference).
-	 * @param float  $deadline    Unix microtime deadline.
-	 * @return bool|WP_Error
 	 */
-	private static function continue_large_store_file( $zip_path, $cd_jsonl, &$zip_offset, $source_path, &$partial, $deadline ) {
+	private static function continue_large_store_file( $zip_path, $cd_php, &$zip_offset, $source_path, &$partial, $deadline ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$src = @fopen( $source_path, 'rb' );
 		if ( ! $src ) {
 			return new WP_Error( 'large_src_open_failed', 'Lost access to large source file during archiving: ' . $partial['entry_name'] );
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, 'r+b' );
 		if ( ! $fp ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
 		}
 
+		$skip_bytes   = isset( $partial['skip_bytes'] ) ? (int) $partial['skip_bytes'] : 0;
 		$bytes_copied = (int) $partial['bytes_copied'];
 		$expected     = (int) $partial['uncomp_size'];
 
-		if ( 0 !== @fseek( $src, $bytes_copied, SEEK_SET ) || 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $src, $skip_bytes + $bytes_copied, SEEK_SET ) || 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'large_seek_failed', 'Seek failed while resuming large file archive.' );
 		}
@@ -445,13 +519,16 @@ class LWPM_Stream_Zip_Writer {
 		$slice = 2 * 1024 * 1024;
 		while ( $bytes_copied < $expected ) {
 			$to_read = min( $slice, $expected - $bytes_copied );
-			$buf     = fread( $src, $to_read );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+			$buf = fread( $src, $to_read );
 			if ( false === $buf || '' === $buf ) {
 				$buf = str_repeat( "\0", min( 65536, $expected - $bytes_copied ) );
 			}
 			$written = self::fwrite_all( $fp, $buf );
 			if ( false === $written ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $src );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_write_failed', 'Disk write failed while streaming large file.' );
 			}
@@ -461,17 +538,21 @@ class LWPM_Stream_Zip_Writer {
 
 			if ( $bytes_copied < $expected && microtime( true ) >= $deadline ) {
 				$partial['bytes_copied'] = $bytes_copied;
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $src );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return false;
 			}
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $src );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		$rec = self::record_central_dir_entry(
-			$cd_jsonl,
+			$cd_php,
 			array(
 				'name'        => $partial['entry_name'],
 				'method'      => 0,
@@ -490,18 +571,15 @@ class LWPM_Stream_Zip_Writer {
 
 	/**
 	 * Finalize the streaming ZIP archive by writing Central Directory headers and EOCD.
-	 *
-	 * @param string $zip_path   Path to .zip.part file.
-	 * @param string $cd_jsonl   Path to central_dir.jsonl metadata log.
-	 * @param int    $zip_offset Current write offset where Central Directory begins.
-	 * @return true|WP_Error
 	 */
-	public static function finalize_archive( $zip_path, $cd_jsonl, &$zip_offset ) {
+	public static function finalize_archive( $zip_path, $cd_php, &$zip_offset ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open ZIP archive to write Central Directory.' );
 		}
 		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'zip_seek_failed', 'Cannot seek to Central Directory offset.' );
 		}
@@ -510,9 +588,11 @@ class LWPM_Stream_Zip_Writer {
 		$cd_size         = 0;
 		$entry_count     = 0;
 
-		if ( file_exists( $cd_jsonl ) ) {
-			$cd_in = @fopen( $cd_jsonl, 'rb' );
+		if ( file_exists( $cd_php ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+			$cd_in = @fopen( $cd_php, 'rb' );
 			if ( ! $cd_in ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'cd_open_failed', 'Cannot read Central Directory metadata log.' );
 			}
@@ -520,7 +600,7 @@ class LWPM_Stream_Zip_Writer {
 			$buffer = '';
 			while ( ( $line = fgets( $cd_in ) ) !== false ) {
 				$line = trim( $line );
-				if ( '' === $line ) {
+				if ( '' === $line || 0 === strpos( $line, '<?php' ) ) {
 					continue;
 				}
 				$meta = json_decode( $line, true );
@@ -535,7 +615,9 @@ class LWPM_Stream_Zip_Writer {
 
 				if ( strlen( $buffer ) >= 512 * 1024 ) {
 					if ( false === self::fwrite_all( $fp, $buffer ) ) {
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 						fclose( $cd_in );
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 						fclose( $fp );
 						return new WP_Error( 'cd_write_failed', 'Failed writing Central Directory entries.' );
 					}
@@ -545,11 +627,14 @@ class LWPM_Stream_Zip_Writer {
 
 			if ( '' !== $buffer ) {
 				if ( false === self::fwrite_all( $fp, $buffer ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $cd_in );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return new WP_Error( 'cd_write_failed', 'Failed flushing Central Directory entries.' );
 				}
 			}
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $cd_in );
 		}
 
@@ -571,6 +656,7 @@ class LWPM_Stream_Zip_Writer {
 			$zip64_loc .= pack( 'V', 1 );
 
 			if ( false === self::fwrite_all( $fp, $zip64_eocd . $zip64_loc ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip64_eocd_failed', 'Failed writing ZIP64 End of Central Directory.' );
 			}
@@ -594,12 +680,14 @@ class LWPM_Stream_Zip_Writer {
 		);
 
 		if ( false === self::fwrite_all( $fp, $eocd ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'eocd_write_failed', 'Failed writing End of Central Directory.' );
 		}
 
 		$zip_offset += 22;
 		@ftruncate( $fp, $zip_offset );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		return true;
@@ -699,11 +787,14 @@ class LWPM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Append one entry record to central_dir.jsonl.
+	 * Append one entry record to PHP-exit-guarded central_dir.php.
 	 */
-	private static function record_central_dir_entry( $cd_jsonl, array $record ) {
+	private static function record_central_dir_entry( $cd_php, array $record ) {
+		if ( ! LDSM_Storage::ensure_guarded_php_file( $cd_php ) ) {
+			return new WP_Error( 'cd_guard_failed', 'Failed initializing guarded Central Directory log.' );
+		}
 		$line = wp_json_encode( $record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . "\n";
-		if ( false === @file_put_contents( $cd_jsonl, $line, FILE_APPEND | LOCK_EX ) ) {
+		if ( false === @file_put_contents( $cd_php, $line, FILE_APPEND | LOCK_EX ) ) {
 			return new WP_Error( 'cd_log_failed', 'Failed recording entry in Central Directory log.' );
 		}
 		return true;
@@ -716,6 +807,7 @@ class LWPM_Stream_Zip_Writer {
 		$total   = strlen( $data );
 		$written = 0;
 		while ( $written < $total ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 			$n = @fwrite( $fp, 0 === $written ? $data : substr( $data, $written ) );
 			if ( false === $n || 0 === $n ) {
 				return false;

@@ -1,22 +1,18 @@
 <?php
 /**
- * Time-Boxed Chunked MySQL / MariaDB Database Exporter — Liberty WP Migrator.
+ * Time-Boxed Chunked MySQL / MariaDB Database Exporter — LibertyDev Site Migrator.
+ *
+ * Writes SQL statements into a PHP-exit-guarded database.sql.php temporary file on disk so
+ * direct HTTP requests on Nginx/Apache/IIS execute exit immediately and return zero bytes.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_DB_Exporter {
+class LDSM_DB_Exporter {
 
-	/**
-	 * Max bytes per single INSERT statement to stay well below MySQL max_allowed_packet.
-	 */
-	const MAX_INSERT_BYTES = 524288; // 512 KB.
-
-	/**
-	 * Rows fetched per SELECT query batch.
-	 */
+	const MAX_INSERT_BYTES  = 524288; // 512 KB.
 	const SELECT_BATCH_SIZE = 350;
 
 	/**
@@ -29,6 +25,7 @@ class LWPM_DB_Exporter {
 		$include_custom = ! empty( $options['include_custom_tables'] );
 		$prefix         = (string) $wpdb->prefix;
 
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$raw_tables = $wpdb->get_results( 'SHOW FULL TABLES', ARRAY_N );
 		if ( ! is_array( $raw_tables ) ) {
 			return new WP_Error( 'db_list_failed', 'Could not list database tables via SHOW FULL TABLES.' );
@@ -44,8 +41,7 @@ class LWPM_DB_Exporter {
 			$table_name = (string) $row[0];
 			$table_type = isset( $row[1] ) ? strtoupper( (string) $row[1] ) : 'BASE TABLE';
 
-			// Never export temporary shadow/old tables.
-			if ( 0 === strpos( $table_name, 'lwpmt_' ) || 0 === strpos( $table_name, 'lwpmold_' ) ) {
+			if ( 0 === strpos( $table_name, 'ldsmt_' ) || 0 === strpos( $table_name, 'ldsmold_' ) ) {
 				continue;
 			}
 
@@ -78,9 +74,9 @@ class LWPM_DB_Exporter {
 	}
 
 	/**
-	 * Run a time-boxed database export step writing to $sql_filepath.
+	 * Run a time-boxed database export step writing to PHP-exit-guarded $sql_php_filepath.
 	 */
-	public static function export_step( array &$state, $sql_filepath, $deadline, $replacer = null ) {
+	public static function export_step( array &$state, $sql_php_filepath, $deadline, $replacer = null ) {
 		global $wpdb;
 
 		if ( ! isset( $state['db_tables'] ) ) {
@@ -90,22 +86,26 @@ class LWPM_DB_Exporter {
 			}
 		}
 
-		$is_new_file = ! file_exists( $sql_filepath ) || 0 === (int) @filesize( $sql_filepath );
-		$fp          = @fopen( $sql_filepath, 'ab' );
+		$is_new_file = ! file_exists( $sql_php_filepath ) || 0 === (int) @filesize( $sql_php_filepath );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming SQL dump across time-boxed ticks.
+		$fp = @fopen( $sql_php_filepath, 'ab' );
 		if ( ! $fp ) {
-			return new WP_Error( 'sql_open_failed', 'Cannot open database.sql for writing.' );
+			return new WP_Error( 'sql_open_failed', 'Cannot open temporary SQL dump file for writing.' );
 		}
 
 		if ( $is_new_file ) {
-			$header  = "-- Liberty WP Migrator SQL Dump (by LibertyDev)\n";
+			$header  = LDSM_Storage::PHP_EXIT_GUARD;
+			$header .= "-- LibertyDev Site Migrator SQL Dump\n";
 			$header .= '-- Generated: ' . gmdate( 'Y-m-d H:i:s' ) . " UTC\n";
 			$header .= '-- Source URL: ' . home_url() . "\n";
 			$header .= "SET NAMES utf8mb4;\n";
 			$header .= "SET FOREIGN_KEY_CHECKS = 0;\n";
 			$header .= "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n\n";
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 			if ( false === fwrite( $fp, $header ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
-				return new WP_Error( 'sql_write_failed', 'Failed writing SQL header.' );
+				return new WP_Error( 'sql_write_failed', 'Failed writing guarded SQL header.' );
 			}
 		}
 
@@ -122,6 +122,7 @@ class LWPM_DB_Exporter {
 			if ( ! is_array( $state['db_table_cursor'] ) || $state['db_table_cursor']['table'] !== $table_name ) {
 				$schema_res = self::emit_table_schema_and_inspect( $fp, $table_name, $has_prefix, $suffix );
 				if ( is_wp_error( $schema_res ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return $schema_res;
 				}
@@ -166,6 +167,7 @@ class LWPM_DB_Exporter {
 			} else {
 				$write_res = self::emit_insert_batches( $fp, $table_name, $has_prefix, $suffix, $rows, $col_meta, $replacer );
 				if ( is_wp_error( $write_res ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return $write_res;
 				}
@@ -189,6 +191,7 @@ class LWPM_DB_Exporter {
 			unset( $cursor );
 
 			if ( microtime( true ) >= $deadline ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return false;
 			}
@@ -199,15 +202,18 @@ class LWPM_DB_Exporter {
 				foreach ( $state['db_views'] as $v_info ) {
 					$v_res = self::emit_view_schema( $fp, $v_info['name'], ! empty( $v_info['has_prefix'] ), (string) $v_info['suffix'] );
 					if ( is_wp_error( $v_res ) ) {
+						// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 						fclose( $fp );
 						return $v_res;
 					}
 				}
 			}
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 			fwrite( $fp, "\nSET FOREIGN_KEY_CHECKS = 1;\n" );
 			$state['db_views_done'] = true;
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 		return true;
 	}
@@ -291,7 +297,7 @@ class LWPM_DB_Exporter {
 
 		$tuples     = array();
 		$curr_bytes = strlen( $prefix_in );
-		$has_rules  = ( $replacer instanceof LWPM_Replacer ) && $replacer->has_rules();
+		$has_rules  = ( $replacer instanceof LDSM_Replacer ) && $replacer->has_rules();
 
 		foreach ( $rows as $row ) {
 			$encoded_vals = array();
@@ -392,7 +398,7 @@ class LWPM_DB_Exporter {
 
 		if ( 'options' === $suffix ) {
 			$conds = array(
-				"`option_name` NOT IN ('lwpm_maintenance_active', 'lwpm_needs_rewrite_flush', 'lwpm_schedule_status', '_transient_lwpm_bg_runner_lock', '_transient_timeout_lwpm_bg_runner_lock')",
+				"`option_name` NOT IN ('ldsm_vault_key', 'ldsm_maintenance_active', 'ldsm_needs_rewrite_flush', 'ldsm_schedule_status', '_transient_ldsm_bg_runner_lock', '_transient_timeout_ldsm_bg_runner_lock')",
 			);
 			if ( ! empty( $options['exclude_transients'] ) ) {
 				$conds[] = "`option_name` NOT LIKE '\\_transient\\_%'";
@@ -405,7 +411,7 @@ class LWPM_DB_Exporter {
 	}
 
 	/**
-	 * Write a standard SQL statement preceded by a single-line -- #LWPM#{json} framing header.
+	 * Write a standard SQL statement preceded by a single-line -- #LDSM#{json} framing header.
 	 */
 	private static function write_framed_statement( $fp, $op, $table_name, $has_prefix, $suffix, $sql ) {
 		$sql_line = $sql . "\n";
@@ -416,12 +422,13 @@ class LWPM_DB_Exporter {
 			'suffix'     => $suffix,
 			'bytes'      => strlen( $sql_line ),
 		);
-		$frame    = '-- #LWPM#' . wp_json_encode( $meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . "\n";
+		$frame    = '-- #LDSM#' . wp_json_encode( $meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . "\n";
 		$payload  = $frame . $sql_line;
 		$total    = strlen( $payload );
 		$written  = 0;
 
 		while ( $written < $total ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 			$n = @fwrite( $fp, 0 === $written ? $payload : substr( $payload, $written ) );
 			if ( false === $n || 0 === $n ) {
 				return false;

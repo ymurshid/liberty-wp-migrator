@@ -1,14 +1,14 @@
 /**
- * Liberty WP Migrator by LibertyDev — Resilient Chunked State-Machine & Backup Scheduler Client
+ * LibertyDev Site Migrator — Resilient Chunked State-Machine & Backup Scheduler Client
  */
 (function () {
 	'use strict';
 
-	if (typeof window.LWPM_CONFIG === 'undefined') {
+	if (typeof window.LDSM_CONFIG === 'undefined') {
 		return;
 	}
 
-	const cfg = window.LWPM_CONFIG;
+	const cfg = window.LDSM_CONFIG;
 	let currentLang = cfg.activeLang === 'ar' ? 'ar' : 'en';
 	let chunkSize = Math.max(256 * 1024, parseInt(cfg.chunkSize, 10) || 1048576);
 	let backupsList = Array.isArray(cfg.backups) ? cfg.backups : [];
@@ -22,70 +22,70 @@
 	let toastTimer = null;
 
 	// DOM Elements
-	const appEl = document.getElementById('lwpm-app');
-	const langBtn = document.getElementById('lwpm-lang-toggle');
-	const tabBtns = document.querySelectorAll('.lwpm-tab');
+	const appEl = document.getElementById('ldsm-app');
+	const langBtn = document.getElementById('ldsm-lang-toggle');
+	const tabBtns = document.querySelectorAll('.ldsm-tab');
 	const panels = {
-		export: document.getElementById('lwpm-panel-export'),
-		import: document.getElementById('lwpm-panel-import'),
-		schedule: document.getElementById('lwpm-panel-schedule'),
-		backups: document.getElementById('lwpm-panel-backups'),
+		export: document.getElementById('ldsm-panel-export'),
+		import: document.getElementById('ldsm-panel-import'),
+		schedule: document.getElementById('ldsm-panel-schedule'),
+		backups: document.getElementById('ldsm-panel-backups'),
 	};
 
-	const errorBox = document.getElementById('lwpm-error-box');
-	const errorText = document.getElementById('lwpm-error-text');
-	const errorClose = document.getElementById('lwpm-error-close');
-	const toastBox = document.getElementById('lwpm-toast-box');
-	const toastText = document.getElementById('lwpm-toast-text');
+	const errorBox = document.getElementById('ldsm-error-box');
+	const errorText = document.getElementById('ldsm-error-text');
+	const errorClose = document.getElementById('ldsm-error-close');
+	const toastBox = document.getElementById('ldsm-toast-box');
+	const toastText = document.getElementById('ldsm-toast-text');
 
-	const progressPanel = document.getElementById('lwpm-progress-panel');
-	const progressLabel = document.getElementById('lwpm-progress-label');
-	const progressDetail = document.getElementById('lwpm-progress-detail');
-	const progressPct = document.getElementById('lwpm-progress-pct');
-	const progressBar = document.getElementById('lwpm-progress-bar');
-	const progressTrack = progressPanel ? progressPanel.querySelector('.lwpm-progress-track') : null;
-	const progressLog = document.getElementById('lwpm-progress-log');
-	const retryNotice = document.getElementById('lwpm-retry-notice');
-	const cancelJobBtn = document.getElementById('lwpm-cancel-job-btn');
+	const progressPanel = document.getElementById('ldsm-progress-panel');
+	const progressLabel = document.getElementById('ldsm-progress-label');
+	const progressDetail = document.getElementById('ldsm-progress-detail');
+	const progressPct = document.getElementById('ldsm-progress-pct');
+	const progressBar = document.getElementById('ldsm-progress-bar');
+	const progressTrack = progressPanel ? progressPanel.querySelector('.ldsm-progress-track') : null;
+	const progressLog = document.getElementById('ldsm-progress-log');
+	const retryNotice = document.getElementById('ldsm-retry-notice');
+	const cancelJobBtn = document.getElementById('ldsm-cancel-job-btn');
 
 	// Export & Backup Shared Ready Banner
-	const exportReadyBox = document.getElementById('lwpm-export-ready');
-	const exportReadyMeta = document.getElementById('lwpm-export-ready-meta');
-	const exportDownloadLink = document.getElementById('lwpm-export-download-link');
+	const exportReadyBox = document.getElementById('ldsm-export-ready');
+	const exportReadyMeta = document.getElementById('ldsm-export-ready-meta');
+	const exportDownloadLink = document.getElementById('ldsm-export-download-link');
 
 	// Export Elements
-	const replaceRowsWrap = document.getElementById('lwpm-replace-rows');
-	const addReplaceBtn = document.getElementById('lwpm-add-replace-btn');
-	const startExportBtn = document.getElementById('lwpm-start-export-btn');
+	const replaceRowsWrap = document.getElementById('ldsm-replace-rows');
+	const addReplaceBtn = document.getElementById('ldsm-add-replace-btn');
+	const startExportBtn = document.getElementById('ldsm-start-export-btn');
 
 	// Import Elements
-	const dropzoneWrap = document.getElementById('lwpm-dropzone-wrap');
-	const dropzone = document.getElementById('lwpm-dropzone');
-	const fileInput = document.getElementById('lwpm-file-input');
-	const serverLimitNote = document.getElementById('lwpm-server-limit-note');
-	const inspectBox = document.getElementById('lwpm-inspect-box');
-	const confirmImportBtn = document.getElementById('lwpm-confirm-import-btn');
-	const cancelInspectBtn = document.getElementById('lwpm-cancel-inspect-btn');
-	const importDoneBox = document.getElementById('lwpm-import-done-box');
-	const visitSiteLink = document.getElementById('lwpm-visit-site-link');
-	const reloadAdminLink = document.getElementById('lwpm-reload-admin-link');
+	const dropzoneWrap = document.getElementById('ldsm-dropzone-wrap');
+	const dropzone = document.getElementById('ldsm-dropzone');
+	const fileInput = document.getElementById('ldsm-file-input');
+	const serverLimitNote = document.getElementById('ldsm-server-limit-note');
+	const inspectBox = document.getElementById('ldsm-inspect-box');
+	const confirmImportBtn = document.getElementById('ldsm-confirm-import-btn');
+	const cancelInspectBtn = document.getElementById('ldsm-cancel-inspect-btn');
+	const importDoneBox = document.getElementById('ldsm-import-done-box');
+	const visitSiteLink = document.getElementById('ldsm-visit-site-link');
+	const reloadAdminLink = document.getElementById('ldsm-reload-admin-link');
 
 	// Backup & Schedule Elements
-	const manualNoteInput = document.getElementById('lwpm-manual-note');
-	const manualBackupBtn = document.getElementById('lwpm-manual-backup-btn');
-	const schedFreqSelect = document.getElementById('lwpm-sched-frequency');
-	const schedDayWrap = document.getElementById('lwpm-sched-day-wrap');
-	const saveScheduleBtn = document.getElementById('lwpm-save-schedule-btn');
-	const runSchedTestBtn = document.getElementById('lwpm-run-sched-test-btn');
-	const schedStateBadge = document.getElementById('lwpm-sched-state-badge');
-	const schedNextRunEl = document.getElementById('lwpm-sched-next-run');
-	const schedLastRunEl = document.getElementById('lwpm-sched-last-run');
+	const manualNoteInput = document.getElementById('ldsm-manual-note');
+	const manualBackupBtn = document.getElementById('ldsm-manual-backup-btn');
+	const schedFreqSelect = document.getElementById('ldsm-sched-frequency');
+	const schedDayWrap = document.getElementById('ldsm-sched-day-wrap');
+	const saveScheduleBtn = document.getElementById('ldsm-save-schedule-btn');
+	const runSchedTestBtn = document.getElementById('ldsm-run-sched-test-btn');
+	const schedStateBadge = document.getElementById('ldsm-sched-state-badge');
+	const schedNextRunEl = document.getElementById('ldsm-sched-next-run');
+	const schedLastRunEl = document.getElementById('ldsm-sched-last-run');
 
 	// Backups Vault Elements
-	const backupsCountBadge = document.getElementById('lwpm-backups-count');
-	const backupsTable = document.getElementById('lwpm-backups-table');
-	const backupsTbody = document.getElementById('lwpm-backups-tbody');
-	const backupsEmpty = document.getElementById('lwpm-backups-empty');
+	const backupsCountBadge = document.getElementById('ldsm-backups-count');
+	const backupsTable = document.getElementById('ldsm-backups-table');
+	const backupsTbody = document.getElementById('ldsm-backups-tbody');
+	const backupsEmpty = document.getElementById('ldsm-backups-empty');
 
 	function t(key) {
 		const dict = (cfg.i18n && cfg.i18n[currentLang]) ? cfg.i18n[currentLang] : {};
@@ -174,7 +174,7 @@
 
 	function toggleWeeklyDayVisibility() {
 		if (!schedFreqSelect || !schedDayWrap) return;
-		schedDayWrap.hidden = schedFreqSelect.value !== 'lwpm_weekly';
+		schedDayWrap.hidden = schedFreqSelect.value !== 'ldsm_weekly';
 	}
 
 	function renderScheduleStatus() {
@@ -182,7 +182,7 @@
 		const enabled = Boolean(scheduleState && scheduleState.settings && scheduleState.settings.enabled);
 
 		schedStateBadge.textContent = enabled ? t('status_active') : t('status_disabled');
-		schedStateBadge.className = 'lwpm-stat-value ' + (enabled ? 'lwpm-status-on' : 'lwpm-status-off');
+		schedStateBadge.className = 'ldsm-stat-value ' + (enabled ? 'ldsm-status-on' : 'ldsm-status-off');
 
 		schedNextRunEl.textContent = (enabled && scheduleState.next_run_str) ? scheduleState.next_run_str : '—';
 		schedLastRunEl.textContent = (scheduleState && scheduleState.last_run_str) ? scheduleState.last_run_str : t('status_none');
@@ -216,15 +216,15 @@
 		if (manualNoteInput && dict.manual_note_placeholder) {
 			manualNoteInput.setAttribute('placeholder', dict.manual_note_placeholder);
 		}
-		const notifyEmailInput = document.getElementById('lwpm-sch-notify-email');
+		const notifyEmailInput = document.getElementById('ldsm-sch-notify-email');
 		if (notifyEmailInput && dict.sched_email_placeholder) {
 			notifyEmailInput.setAttribute('placeholder', dict.sched_email_placeholder);
 		}
 
-		document.querySelectorAll('.lwpm-find-input').forEach((inp) => {
+		document.querySelectorAll('.ldsm-find-input').forEach((inp) => {
 			inp.setAttribute('placeholder', dict.find_placeholder || '');
 		});
-		document.querySelectorAll('.lwpm-replace-input').forEach((inp) => {
+		document.querySelectorAll('.ldsm-replace-input').forEach((inp) => {
 			inp.setAttribute('placeholder', dict.replace_placeholder || '');
 		});
 
@@ -338,38 +338,38 @@
 		backupsList.forEach((b) => {
 			const trig = b.trigger || 'export';
 			let typeLabel = t('type_export');
-			let pillClass = 'lwpm-type-export';
+			let pillClass = 'ldsm-type-export';
 			if (trig === 'manual') {
 				typeLabel = t('type_manual');
-				pillClass = 'lwpm-type-manual';
+				pillClass = 'ldsm-type-manual';
 			} else if (trig === 'scheduled') {
 				typeLabel = t('type_scheduled');
-				pillClass = 'lwpm-type-scheduled';
+				pillClass = 'ldsm-type-scheduled';
 			}
 
-			const noteHtml = b.note ? `<span class="lwpm-note-sub">${escHtml(b.note)}</span>` : '';
+			const noteHtml = b.note ? `<span class="ldsm-note-sub">${escHtml(b.note)}</span>` : '';
 
 			const tr = document.createElement('tr');
 			tr.innerHTML = `
 				<td>
-					<strong class="lwpm-ltr">${escHtml(b.filename)}</strong>
+					<strong class="ldsm-ltr">${escHtml(b.filename)}</strong>
 					${noteHtml}
 				</td>
-				<td><span class="lwpm-type-pill ${pillClass}">${escHtml(typeLabel)}</span></td>
-				<td><span class="lwpm-ltr">${escHtml(b.source_url || '')}</span></td>
-				<td><span class="lwpm-ltr">${escHtml(b.created_at || '')}</span></td>
-				<td><span class="lwpm-ltr">${escHtml(b.size_human || '')}</span></td>
+				<td><span class="ldsm-type-pill ${pillClass}">${escHtml(typeLabel)}</span></td>
+				<td><span class="ldsm-ltr">${escHtml(b.source_url || '')}</span></td>
+				<td><span class="ldsm-ltr">${escHtml(b.created_at || '')}</span></td>
+				<td><span class="ldsm-ltr">${escHtml(b.size_human || '')}</span></td>
 				<td>
-					<div class="lwpm-row-actions">
-						<a href="${escHtml(b.download_url || '#')}" class="lwpm-btn lwpm-btn-primary lwpm-btn-sm">
+					<div class="ldsm-row-actions">
+						<a href="${escHtml(b.download_url || '#')}" class="ldsm-btn ldsm-btn-primary ldsm-btn-sm">
 							<span class="dashicons dashicons-download"></span>
 							<span>${escHtml(t('btn_download'))}</span>
 						</a>
-						<button type="button" class="lwpm-btn lwpm-btn-secondary lwpm-btn-sm lwpm-restore-btn" data-file="${escHtml(b.filename)}">
+						<button type="button" class="ldsm-btn ldsm-btn-secondary ldsm-btn-sm ldsm-restore-btn" data-file="${escHtml(b.filename)}">
 							<span class="dashicons dashicons-backup"></span>
 							<span>${escHtml(t('btn_restore'))}</span>
 						</button>
-						<button type="button" class="lwpm-btn lwpm-btn-danger-outline lwpm-btn-sm lwpm-delete-btn" data-file="${escHtml(b.filename)}">
+						<button type="button" class="ldsm-btn ldsm-btn-danger-outline ldsm-btn-sm ldsm-delete-btn" data-file="${escHtml(b.filename)}">
 							<span class="dashicons dashicons-trash"></span>
 							<span>${escHtml(t('btn_delete'))}</span>
 						</button>
@@ -383,13 +383,13 @@
 	function addReplaceRow(findVal = '', replaceVal = '') {
 		if (!replaceRowsWrap) return;
 		const row = document.createElement('div');
-		row.className = 'lwpm-replace-row';
+		row.className = 'ldsm-replace-row';
 		row.innerHTML = `
-			<input type="text" class="lwpm-find-input" placeholder="${escHtml(t('find_placeholder'))}" value="${escHtml(findVal)}">
-			<input type="text" class="lwpm-replace-input" placeholder="${escHtml(t('replace_placeholder'))}" value="${escHtml(replaceVal)}">
-			<button type="button" class="lwpm-remove-row-btn" title="Remove">&times;</button>
+			<input type="text" class="ldsm-find-input" placeholder="${escHtml(t('find_placeholder'))}" value="${escHtml(findVal)}">
+			<input type="text" class="ldsm-replace-input" placeholder="${escHtml(t('replace_placeholder'))}" value="${escHtml(replaceVal)}">
+			<button type="button" class="ldsm-remove-row-btn" title="Remove">&times;</button>
 		`;
-		row.querySelector('.lwpm-remove-row-btn').addEventListener('click', () => {
+		row.querySelector('.ldsm-remove-row-btn').addEventListener('click', () => {
 			row.remove();
 		});
 		replaceRowsWrap.appendChild(row);
@@ -397,23 +397,23 @@
 
 	function collectExportOptions() {
 		const customReplaces = [];
-		document.querySelectorAll('.lwpm-replace-row').forEach((row) => {
-			const s = row.querySelector('.lwpm-find-input').value;
-			const r = row.querySelector('.lwpm-replace-input').value;
+		document.querySelectorAll('.ldsm-replace-row').forEach((row) => {
+			const s = row.querySelector('.ldsm-find-input').value;
+			const r = row.querySelector('.ldsm-replace-input').value;
 			if (s && s !== r) {
 				customReplaces.push({ search: s, replace: r });
 			}
 		});
 
 		return {
-			exclude_cache: document.getElementById('lwpm-exp-exclude-cache').checked,
-			exclude_transients: document.getElementById('lwpm-exp-exclude-transients').checked,
-			exclude_revisions: document.getElementById('lwpm-exp-exclude-revisions').checked,
-			exclude_spam: document.getElementById('lwpm-exp-exclude-spam').checked,
-			exclude_media: document.getElementById('lwpm-exp-exclude-media').checked,
-			exclude_themes: document.getElementById('lwpm-exp-exclude-themes').checked,
-			exclude_plugins: document.getElementById('lwpm-exp-exclude-plugins').checked,
-			include_custom_tables: document.getElementById('lwpm-exp-custom-tables').checked,
+			exclude_cache: document.getElementById('ldsm-exp-exclude-cache').checked,
+			exclude_transients: document.getElementById('ldsm-exp-exclude-transients').checked,
+			exclude_revisions: document.getElementById('ldsm-exp-exclude-revisions').checked,
+			exclude_spam: document.getElementById('ldsm-exp-exclude-spam').checked,
+			exclude_media: document.getElementById('ldsm-exp-exclude-media').checked,
+			exclude_themes: document.getElementById('ldsm-exp-exclude-themes').checked,
+			exclude_plugins: document.getElementById('ldsm-exp-exclude-plugins').checked,
+			include_custom_tables: document.getElementById('ldsm-exp-custom-tables').checked,
 			custom_replaces: customReplaces,
 		};
 	}
@@ -441,7 +441,7 @@
 			updateProgress(startRes.step_key || 'progress_scanning_files', startRes.percent || 4, startRes.detail || '', startRes.phase || '');
 
 			while (!cancelRequested) {
-				const tick = await postAjax('lwpm_export_tick', {
+				const tick = await postAjax('ldsm_export_tick', {
 					job_id: activeJobId,
 				});
 
@@ -458,7 +458,7 @@
 					exportReadyMeta.textContent = `${tick.filename} (${tick.size_human})`;
 					exportDownloadLink.setAttribute('href', tick.download_url);
 					exportReadyBox.hidden = false;
-					if (manualNoteInput && initAction === 'lwpm_manual_backup_start') {
+					if (manualNoteInput && initAction === 'ldsm_manual_backup_start') {
 						manualNoteInput.value = '';
 					}
 					hideProgress();
@@ -487,22 +487,22 @@
 		saveScheduleBtn.disabled = true;
 
 		const payload = {
-			enabled: document.getElementById('lwpm-sched-enabled').checked,
-			frequency: document.getElementById('lwpm-sched-frequency').value,
-			day_of_week: parseInt(document.getElementById('lwpm-sched-day').value, 10) || 5,
-			run_time: document.getElementById('lwpm-sched-time').value || '03:00',
-			retention: parseInt(document.getElementById('lwpm-sched-retention').value, 10) || 0,
-			exclude_cache: document.getElementById('lwpm-sch-exclude-cache').checked,
-			exclude_transients: document.getElementById('lwpm-sch-exclude-transients').checked,
-			exclude_revisions: document.getElementById('lwpm-sch-exclude-revisions').checked,
-			exclude_spam: document.getElementById('lwpm-sch-exclude-spam').checked,
-			exclude_media: document.getElementById('lwpm-sch-exclude-media').checked,
-			notify_enabled: document.getElementById('lwpm-sch-notify-enabled').checked,
-			notify_email: document.getElementById('lwpm-sch-notify-email').value || '',
+			enabled: document.getElementById('ldsm-sched-enabled').checked,
+			frequency: document.getElementById('ldsm-sched-frequency').value,
+			day_of_week: parseInt(document.getElementById('ldsm-sched-day').value, 10) || 5,
+			run_time: document.getElementById('ldsm-sched-time').value || '03:00',
+			retention: parseInt(document.getElementById('ldsm-sched-retention').value, 10) || 0,
+			exclude_cache: document.getElementById('ldsm-sch-exclude-cache').checked,
+			exclude_transients: document.getElementById('ldsm-sch-exclude-transients').checked,
+			exclude_revisions: document.getElementById('ldsm-sch-exclude-revisions').checked,
+			exclude_spam: document.getElementById('ldsm-sch-exclude-spam').checked,
+			exclude_media: document.getElementById('ldsm-sch-exclude-media').checked,
+			notify_enabled: document.getElementById('ldsm-sch-notify-enabled').checked,
+			notify_email: document.getElementById('ldsm-sch-notify-email').value || '',
 		};
 
 		try {
-			const res = await postAjax('lwpm_save_schedule', {
+			const res = await postAjax('ldsm_save_schedule', {
 				schedule: JSON.stringify(payload),
 			});
 			if (res.schedule) {
@@ -526,12 +526,12 @@
 		dropzoneWrap.hidden = true;
 		importDoneBox.hidden = true;
 
-		document.getElementById('lwpm-ins-source').textContent = info.source_url || '-';
-		document.getElementById('lwpm-ins-dest').textContent = info.dest_url || '-';
-		document.getElementById('lwpm-ins-versions').textContent = `WP ${info.wp_version || '-'} / PHP ${info.php_version || '-'}`;
-		document.getElementById('lwpm-ins-files').textContent = info.files_count || '0';
-		document.getElementById('lwpm-ins-tables').textContent = String(info.tables_count || 0);
-		document.getElementById('lwpm-ins-size').textContent = info.data_size_human || '-';
+		document.getElementById('ldsm-ins-source').textContent = info.source_url || '-';
+		document.getElementById('ldsm-ins-dest').textContent = info.dest_url || '-';
+		document.getElementById('ldsm-ins-versions').textContent = `WP ${info.wp_version || '-'} / PHP ${info.php_version || '-'}`;
+		document.getElementById('ldsm-ins-files').textContent = info.files_count || '0';
+		document.getElementById('ldsm-ins-tables').textContent = String(info.tables_count || 0);
+		document.getElementById('ldsm-ins-size').textContent = info.data_size_human || '-';
 
 		inspectBox.hidden = false;
 	}
@@ -560,7 +560,7 @@
 		updateProgress('progress_uploading_chunks', 1, `0 / ${formatBytes(file.size)}`, 'upload');
 
 		try {
-			const initRes = await postAjax('lwpm_import_init_upload', {
+			const initRes = await postAjax('ldsm_import_init_upload', {
 				filename: file.name,
 				total_size: file.size,
 			});
@@ -578,7 +578,7 @@
 
 				try {
 					const chunkRes = await postAjax(
-						'lwpm_import_upload_chunk',
+						'ldsm_import_upload_chunk',
 						{
 							job_id: activeJobId,
 							offset: offset,
@@ -605,7 +605,7 @@
 			}
 
 			updateProgress('progress_inspecting_zip', 98, file.name, 'inspect');
-			const inspectInfo = await postAjax('lwpm_import_inspect', {
+			const inspectInfo = await postAjax('ldsm_import_inspect', {
 				job_id: activeJobId,
 			});
 
@@ -637,7 +637,7 @@
 		updateProgress('progress_inspecting_zip', 50, filename, 'inspect');
 
 		try {
-			const inspectInfo = await postAjax('lwpm_import_from_backup', {
+			const inspectInfo = await postAjax('ldsm_import_from_backup', {
 				filename: filename,
 			});
 			hideProgress();
@@ -659,8 +659,8 @@
 
 		const jobId = activeJobId;
 		const importOptions = {
-			keep_current_admin: document.getElementById('lwpm-imp-keep-admin').checked,
-			skip_guid: document.getElementById('lwpm-imp-skip-guid').checked,
+			keep_current_admin: document.getElementById('ldsm-imp-keep-admin').checked,
+			skip_guid: document.getElementById('ldsm-imp-skip-guid').checked,
 		};
 
 		inspectBox.hidden = true;
@@ -670,7 +670,7 @@
 		updateProgress('progress_extracting_files', 8, '', 'confirm');
 
 		try {
-			const startRes = await postAjax('lwpm_import_confirm', {
+			const startRes = await postAjax('ldsm_import_confirm', {
 				job_id: jobId,
 				import_options: JSON.stringify(importOptions),
 			});
@@ -678,7 +678,7 @@
 			updateProgress(startRes.step_key || 'progress_extracting_files', startRes.percent || 10, startRes.detail || '', startRes.phase || '');
 
 			while (!cancelRequested) {
-				const tick = await postAjax('lwpm_import_tick', {
+				const tick = await postAjax('ldsm_import_tick', {
 					job_id: jobId,
 				});
 
@@ -728,7 +728,7 @@
 		if (jobToCancel) {
 			activeJobId = null;
 			try {
-				await postAjax('lwpm_cancel_job', { job_id: jobToCancel }, { ignoreCancel: true, maxRetries: 1 });
+				await postAjax('ldsm_cancel_job', { job_id: jobToCancel }, { ignoreCancel: true, maxRetries: 1 });
 			} catch (e) {}
 		}
 	}
@@ -745,7 +745,7 @@
 		langBtn.addEventListener('click', () => {
 			const next = currentLang === 'ar' ? 'en' : 'ar';
 			applyLanguage(next);
-			postAjax('lwpm_set_lang', { lang: next }, { ignoreCancel: true, maxRetries: 0 }).catch(() => {});
+			postAjax('ldsm_set_lang', { lang: next }, { ignoreCancel: true, maxRetries: 0 }).catch(() => {});
 		});
 	}
 
@@ -759,7 +759,7 @@
 
 	if (startExportBtn) {
 		startExportBtn.addEventListener('click', () => {
-			runArchiveJobLoop('lwpm_export_start', {
+			runArchiveJobLoop('ldsm_export_start', {
 				options: JSON.stringify(collectExportOptions()),
 			});
 		});
@@ -768,7 +768,7 @@
 	if (manualBackupBtn) {
 		manualBackupBtn.addEventListener('click', () => {
 			const noteVal = manualNoteInput ? manualNoteInput.value.trim() : '';
-			runArchiveJobLoop('lwpm_manual_backup_start', {
+			runArchiveJobLoop('ldsm_manual_backup_start', {
 				note: noteVal,
 			});
 		});
@@ -784,7 +784,7 @@
 
 	if (runSchedTestBtn) {
 		runSchedTestBtn.addEventListener('click', () => {
-			runArchiveJobLoop('lwpm_run_scheduled_test', {});
+			runArchiveJobLoop('ldsm_run_scheduled_test', {});
 		});
 	}
 
@@ -841,14 +841,14 @@
 
 	if (backupsTbody) {
 		backupsTbody.addEventListener('click', async (e) => {
-			const restoreBtn = e.target.closest('.lwpm-restore-btn');
+			const restoreBtn = e.target.closest('.ldsm-restore-btn');
 			if (restoreBtn) {
 				const file = restoreBtn.getAttribute('data-file');
 				if (file) startRestoreFromSavedBackup(file);
 				return;
 			}
 
-			const deleteBtn = e.target.closest('.lwpm-delete-btn');
+			const deleteBtn = e.target.closest('.ldsm-delete-btn');
 			if (deleteBtn && !isRunning) {
 				const file = deleteBtn.getAttribute('data-file');
 				if (!file || !window.confirm(t('confirm_delete'))) {
@@ -856,7 +856,7 @@
 				}
 				deleteBtn.disabled = true;
 				try {
-					const res = await postAjax('lwpm_delete_backup', { filename: file });
+					const res = await postAjax('ldsm_delete_backup', { filename: file });
 					if (Array.isArray(res.backups)) {
 						backupsList = res.backups;
 						renderBackupsTable();

@@ -1,0 +1,532 @@
+# Copyright (C) 2026 LibertyDev
+# This file is distributed under the GPL v2 or later.
+msgid ""
+msgstr ""
+"Project-Id-Version: LibertyDev Site Migrator 1.3.0\n"
+"Report-Msgid-Bugs-To: https://github.com/ymurshid/liberty-wp-migrator/issues\n"
+"POT-Creation-Date: 2026-11-24 00:00:00+00:00\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: LibertyDev-POT-Builder\n"
+"X-Domain: libertydev-site-migrator\n"
+
+#: includes/class-ldsm-i18n.php:184
+msgid "LibertyDev Site Migrator — Migration & Automated Backup"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:185
+msgid "LibertyDev Migrator"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:186
+msgid "Open Migrator"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:187
+msgid "by LibertyDev"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:188
+msgid "Unlimited-size site migration, one-click manual backups, and automated scheduled backups (daily / weekly / monthly) with serialization-safe domain replacement."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:189
+msgid "Export Site"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:190
+msgid "Import Site"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:191
+msgid "Backup & Schedule"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:192
+msgid "Backups Vault"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:193
+msgid "Unlimited Size • LibertyDev Engine"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:196
+msgid "Create Full Compressed Site Archive (.zip)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:197
+msgid "Packages your database, plugins, themes, uploads, and languages in small time-boxed batches to prevent PHP timeouts."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:198
+msgid "Custom Find & Replace During Export (Optional)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:199
+msgid "Note: Domain URLs and server file paths are automatically replaced during import on a new domain. Only add rules here for extra custom text changes."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:200
+msgid "Search for text..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:201
+msgid "Replace with..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:202
+msgid "+ Add Replace Rule"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:203
+msgid "Advanced Exclusion Options"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:204
+msgid "Exclude cache folders & debug logs (Recommended)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:205
+msgid "Exclude temporary DB transients (Recommended)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:206
+msgid "Exclude old post revisions"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:207
+msgid "Exclude spam & trashed comments"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:208
+msgid "Exclude media library (Uploads)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:209
+msgid "Exclude inactive themes"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:210
+msgid "Exclude inactive plugins"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:211
+msgid "Include non-prefixed custom database tables"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:212
+msgid "Export Site to Compressed .ZIP"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:213
+msgid "Your compressed site archive is ready!"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:214
+msgid "Download Archive (.zip)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:217
+msgid "Import Site Archive onto This Domain"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:218
+msgid "Upload a .zip archive created by LibertyDev Site Migrator. Large files are sliced into small chunks automatically to bypass server upload limits."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:219
+msgid "Drag & drop your site archive (.zip) here"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:220
+msgid "or click to browse — supports multi-GB archives via automatic chunked upload"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:221
+msgid "Choose .zip Archive"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:223
+msgid "Standard server upload limit: %s — bypassed automatically via chunked upload."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:224
+msgid "Important Notice Before Importing"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:225
+msgid "Importing an archive will replace this site’s database, themes, plugins, and media files with the contents of the archive. Back up first if needed."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:228
+msgid "Review Archive Before Overwriting Site"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:229
+msgid "Source Site URL"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:230
+msgid "Destination URL (This Site)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:231
+msgid "Archive Core / PHP Version"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:232
+msgid "Archived Files"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:233
+msgid "Database Tables"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:234
+msgid "Total Data Size"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:235
+msgid "Preserve my current Administrator account & password so I stay logged in after migration"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:236
+msgid "Do not replace URLs inside posts GUID column"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:237
+msgid "Confirm & Start Site Import Now"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:238
+msgid "Cancel"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:241
+msgid "One-Click Manual Backup"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:242
+msgid "Create an instant full compressed backup of this site and store it securely inside your server Backups Vault for 1-click restore anytime."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:243
+msgid "Backup Label / Note (Optional)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:244
+msgid "e.g., Before theme or plugin update..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:245
+msgid "Create Manual Backup Now"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:247
+msgid "Automated Scheduled Backups"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:248
+msgid "Runs chunked background backups automatically without slowing down visitors or hitting timeouts, and rotates old backups automatically."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:249
+msgid "Enable Automated Scheduled Backups"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:250
+msgid "Backup Frequency"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:251
+msgid "Every 6 Hours"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:252
+msgid "Twice Daily (Every 12 Hours)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:253
+msgid "Daily"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:254
+msgid "Weekly"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:255
+msgid "Bi-Weekly (Every 14 Days)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:256
+msgid "Monthly (Every 30 Days)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:257
+msgid "Preferred Day (for Weekly Schedule)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:258
+msgid "Sunday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:259
+msgid "Monday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:260
+msgid "Tuesday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:261
+msgid "Wednesday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:262
+msgid "Thursday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:263
+msgid "Friday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:264
+msgid "Saturday"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:265
+msgid "Preferred Run Time (Site Timezone)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:266
+msgid "Scheduled Backup Retention Limit"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:267
+msgid "Keep All Backups (Unlimited)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:269
+msgid "Keep Last %d Scheduled Backups"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:270
+msgid "Scheduled Backup Content Rules"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:271
+msgid "Send email notification when a scheduled backup completes"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:272
+msgid "Notification recipient email..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:273
+msgid "Save Schedule Settings"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:274
+msgid "Run Scheduled Backup Now"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:275
+msgid "Backup schedule settings saved and synchronized!"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:276
+msgid "Schedule Status"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:277
+msgid "Active & Scheduled"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:278
+msgid "Disabled (Manual Only)"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:279
+msgid "Next Scheduled Run"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:280
+msgid "Last Scheduled Backup"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:281
+msgid "None yet"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:284
+msgid "Backups Vault Stored on This Server"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:285
+msgid "All manual, scheduled, and export archives are stored inside a cryptographically randomized uploads vault shielded across Apache, Nginx, and IIS."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:286
+msgid "Archive & Label"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:287
+msgid "Type"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:288
+msgid "Created At"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:289
+msgid "Size"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:290
+msgid "Source URL"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:291
+msgid "Actions"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:292
+msgid "Manual"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:293
+msgid "Scheduled"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:294
+msgid "Export"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:295
+msgid "Download"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:296
+msgid "Restore Here"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:297
+msgid "Delete"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:298
+msgid "No saved backups yet. Create a manual backup or enable automated scheduling."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:299
+msgid "Are you sure you want to permanently delete this backup archive?"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:302
+msgid "Initializing migration/backup job..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:303
+msgid "Scanning site directories..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:304
+msgid "Exporting database tables in batches..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:305
+msgid "Compressing files into streaming ZIP archive..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:306
+msgid "Writing ZIP Central Directory & finalizing..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:307
+msgid "Uploading archive in chunks..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:308
+msgid "Inspecting archive & reading manifest..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:309
+msgid "Extracting site files safely..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:310
+msgid "Importing database into shadow tables..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:311
+msgid "Running serialization-safe domain & path replacement..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:312
+msgid "Atomically swapping tables & flushing caches/permalinks..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:313
+msgid "Site Migration Completed 100% Successfully!"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:314
+msgid "Domain URLs, file paths, table prefixes, and permalinks have all been updated."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:315
+msgid "Visit Live Site"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:316
+msgid "Reload Admin Dashboard"
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:317
+msgid "Temporary network/server hiccup, retrying automatically..."
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:318
+msgid "Error: "
+msgstr ""
+
+#: includes/class-ldsm-i18n.php:319
+msgid "Please select a valid .zip archive file."
+msgstr ""
+
+#: includes/class-ldsm-scheduler.php:39
+msgid "Every 6 Hours (LibertyDev Site Migrator)"
+msgstr ""
+
+#: includes/class-ldsm-scheduler.php:43
+msgid "Every 12 Hours (LibertyDev Site Migrator)"
+msgstr ""
+
+#: includes/class-ldsm-scheduler.php:47
+msgid "Daily (LibertyDev Site Migrator)"
+msgstr ""
+
+#: includes/class-ldsm-scheduler.php:51
+msgid "Weekly (LibertyDev Site Migrator)"
+msgstr ""
+
+#: includes/class-ldsm-scheduler.php:55
+msgid "Every 2 Weeks (LibertyDev Site Migrator)"
+msgstr ""
+
+#: includes/class-ldsm-scheduler.php:59
+msgid "Monthly / 30 Days (LibertyDev Site Migrator)"
+msgstr ""
+
+#: libertydev-site-migrator.php:217
+msgid "You do not have sufficient permissions to access this page."
+msgstr ""
+
+#: libertydev-site-migrator.php:241
+msgid "We are currently updating the site. Please check back in a moment."
+msgstr ""
+
+#: libertydev-site-migrator.php:242
+msgid "Briefly Unavailable for Scheduled Maintenance"
+msgstr ""

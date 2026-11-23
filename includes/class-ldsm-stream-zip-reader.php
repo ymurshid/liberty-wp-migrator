@@ -1,16 +1,29 @@
 <?php
 /**
- * Pure-PHP Random-Access Streaming ZIP / ZIP64 Reader & Extractor — Liberty WP Migrator.
+ * Pure-PHP Random-Access Streaming ZIP / ZIP64 Reader & Symlink-Safe Extractor — LibertyDev Site Migrator.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_Stream_Zip_Reader {
+class LDSM_Stream_Zip_Reader {
 
 	/**
-	 * Validate and sanitize a relative entry path inside a ZIP archive (Zip-Slip protection).
+	 * Allowed logical root prefixes inside archives (supports both current v2 logical roots and legacy wp-content/ archives).
+	 *
+	 * @var array<string,bool>
+	 */
+	private static $allowed_logical_roots = array(
+		'plugins'    => true,
+		'mu-plugins' => true,
+		'themes'     => true,
+		'uploads'    => true,
+		'languages'  => true,
+	);
+
+	/**
+	 * Validate and sanitize a relative entry path inside a ZIP archive (Zip-Slip lexical check).
 	 *
 	 * @param string $raw_name Raw entry name from Central Directory.
 	 * @return string|false
@@ -43,14 +56,14 @@ class LWPM_Stream_Zip_Reader {
 
 	/**
 	 * Read the ZIP Central Directory, locate manifest.json & database/database.sql,
-	 * and write all extractable entries to $index_jsonl_path.
+	 * and write all extractable entries into PHP-exit-guarded $index_php_path.
 	 *
-	 * @param string $zip_path         Path to .zip archive.
-	 * @param string $index_jsonl_path Output path for indexed entries (.jsonl).
+	 * @param string $zip_path       Path to .zip archive.
+	 * @param string $index_php_path Output path for PHP-guarded extraction index (.php).
 	 * @return array<string,mixed>|WP_Error
 	 */
-	public static function index_archive( $zip_path, $index_jsonl_path ) {
-		if ( ! is_file( $zip_path ) || ! is_readable( $zip_path ) ) {
+	public static function index_archive( $zip_path, $index_php_path ) {
+		if ( ! is_file( $zip_path ) || is_link( $zip_path ) || ! is_readable( $zip_path ) ) {
 			return new WP_Error( 'zip_unreadable', 'Archive file does not exist or cannot be read.' );
 		}
 
@@ -60,6 +73,7 @@ class LWPM_Stream_Zip_Reader {
 			return new WP_Error( 'zip_too_small', 'Selected file is too small to be a valid ZIP archive.' );
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, 'rb' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Could not open ZIP archive for reading.' );
@@ -67,6 +81,7 @@ class LWPM_Stream_Zip_Reader {
 
 		$eocd_info = self::locate_central_directory( $fp, $file_size );
 		if ( is_wp_error( $eocd_info ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return $eocd_info;
 		}
@@ -75,6 +90,7 @@ class LWPM_Stream_Zip_Reader {
 		$total_entries = (int) $eocd_info['total_entries'];
 
 		if ( 0 !== @fseek( $fp, $cd_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'cd_seek_failed', 'Could not seek to ZIP Central Directory.' );
 		}
@@ -83,6 +99,7 @@ class LWPM_Stream_Zip_Reader {
 		$manifest_path = null;
 
 		for ( $i = 0; $i < $total_entries; $i++ ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$hdr = fread( $fp, 46 );
 			if ( false === $hdr || strlen( $hdr ) < 46 ) {
 				break;
@@ -92,11 +109,14 @@ class LWPM_Stream_Zip_Reader {
 				$hdr
 			);
 			if ( ! is_array( $u ) || 0x02014b50 !== (int) $u['sig'] ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'cd_corrupt', 'Corrupt Central Directory signature in ZIP archive.' );
 			}
 
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$name  = $u['namelen'] > 0 ? fread( $fp, $u['namelen'] ) : '';
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$extra = $u['extralen'] > 0 ? fread( $fp, $u['extralen'] ) : '';
 			if ( $u['comlen'] > 0 ) {
 				@fseek( $fp, $u['comlen'], SEEK_CUR );
@@ -136,12 +156,13 @@ class LWPM_Stream_Zip_Reader {
 			$raw_entries[] = $entry;
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		if ( null === $manifest_path ) {
 			return new WP_Error(
 				'missing_manifest',
-				'This ZIP archive does not contain a valid Liberty WP Migrator manifest.json file.'
+				'This ZIP archive does not contain a valid LibertyDev Site Migrator manifest.json file.'
 			);
 		}
 
@@ -150,10 +171,15 @@ class LWPM_Stream_Zip_Reader {
 			$strip_prefix = substr( $manifest_path, 0, -strlen( 'manifest.json' ) );
 		}
 
-		$idx_out = @fopen( $index_jsonl_path, 'wb' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$idx_out = @fopen( $index_php_path, 'wb' );
 		if ( ! $idx_out ) {
 			return new WP_Error( 'index_write_failed', 'Could not create extraction index file.' );
 		}
+
+		// Prepend PHP exit guard at byte 0 so Nginx never serves index contents over HTTP!
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		fwrite( $idx_out, LDSM_Storage::PHP_EXIT_GUARD );
 
 		$manifest_entry   = null;
 		$db_entry         = null;
@@ -174,41 +200,64 @@ class LWPM_Stream_Zip_Reader {
 				continue;
 			}
 
-			$entry['rel_path'] = $rel;
-
 			if ( 'manifest.json' === $rel ) {
-				$manifest_entry = $entry;
+				$entry['rel_path'] = $rel;
+				$manifest_entry    = $entry;
 				continue;
 			}
 
 			if ( 'database/database.sql' === $rel ) {
+				$entry['rel_path'] = $rel;
 				$db_entry          = $entry;
 				$uncompressed_sum += (int) $entry['uncomp_size'];
 				continue;
 			}
 
+			// Normalize legacy "wp-content/{root}/..." entries into logical "{root}/..." paths.
 			if ( 0 === strpos( $rel, 'wp-content/' ) ) {
-				if (
-					0 === strpos( $rel, 'wp-content/lwpm-backups/' ) ||
-					0 === strpos( $rel, 'wp-content/plugins/liberty-wp-migrator/' )
-				) {
-					continue;
-				}
+				$rel = substr( $rel, 11 );
+			}
 
-				$files_count      += 1;
-				$uncompressed_sum += (int) $entry['uncomp_size'];
-				$write_buf        .= wp_json_encode( $entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . "\n";
+			$slash_pos = strpos( $rel, '/' );
+			if ( false === $slash_pos ) {
+				continue;
+			}
 
-				if ( strlen( $write_buf ) >= 256 * 1024 ) {
-					fwrite( $idx_out, $write_buf );
-					$write_buf = '';
-				}
+			$root_key = substr( $rel, 0, $slash_pos );
+			$sub_rel  = substr( $rel, $slash_pos + 1 );
+
+			if ( ! isset( self::$allowed_logical_roots[ $root_key ] ) || '' === $sub_rel ) {
+				continue;
+			}
+
+			// Never overwrite our own running plugin or backups vault directory!
+			if ( 'plugins' === $root_key && ( 0 === strpos( $sub_rel, 'libertydev-site-migrator/' ) || 0 === strpos( $sub_rel, 'liberty-wp-migrator/' ) ) ) {
+				continue;
+			}
+			if ( 'uploads' === $root_key && 0 === strpos( $sub_rel, 'libertydev-site-migrator/' ) ) {
+				continue;
+			}
+
+			$entry['root_key'] = $root_key;
+			$entry['sub_path'] = $sub_rel;
+			$entry['rel_path'] = $root_key . '/' . $sub_rel;
+
+			$files_count      += 1;
+			$uncompressed_sum += (int) $entry['uncomp_size'];
+			$write_buf        .= wp_json_encode( $entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . "\n";
+
+			if ( strlen( $write_buf ) >= 256 * 1024 ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				fwrite( $idx_out, $write_buf );
+				$write_buf = '';
 			}
 		}
 
 		if ( '' !== $write_buf ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 			fwrite( $idx_out, $write_buf );
 		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $idx_out );
 
 		if ( null === $manifest_entry || null === $db_entry ) {
@@ -239,6 +288,7 @@ class LWPM_Stream_Zip_Reader {
 	 * Extract a small ZIP entry directly into a PHP string.
 	 */
 	public static function extract_entry_to_string( $zip_path, array $entry_meta ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, 'rb' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open ZIP archive.' );
@@ -246,6 +296,7 @@ class LWPM_Stream_Zip_Reader {
 
 		$data_offset = self::resolve_entry_data_offset( $fp, (int) $entry_meta['offset'] );
 		if ( is_wp_error( $data_offset ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return $data_offset;
 		}
@@ -254,16 +305,19 @@ class LWPM_Stream_Zip_Reader {
 		$method    = (int) $entry_meta['method'];
 
 		if ( 0 === $comp_size ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return '';
 		}
 
 		if ( 0 !== @fseek( $fp, $data_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'entry_seek_failed', 'Cannot seek to entry payload.' );
 		}
 
 		$comp_bytes = self::fread_exact( $fp, $comp_size );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		if ( false === $comp_bytes ) {
@@ -285,23 +339,39 @@ class LWPM_Stream_Zip_Reader {
 	}
 
 	/**
-	 * Extract an entry from the ZIP archive to $dest_path on disk.
+	 * Extract an entry from the ZIP archive to $dest_path on disk after strict symlink & realpath boundary verification.
+	 *
+	 * @param string     $zip_path          Path to .zip archive.
+	 * @param array      $entry_meta        Entry metadata.
+	 * @param string     $dest_path         Target filesystem path.
+	 * @param string     $allowed_root      Canonical allowed root boundary for symlink check.
+	 * @param array|null $partial_extract   Resumable state for large STORE files.
+	 * @param float      $deadline          Unix microtime deadline.
+	 * @param bool       $prepend_php_guard When true (for temporary database.sql.php), prepend <?php exit; ?> header.
+	 * @return bool|WP_Error
 	 */
-	public static function extract_entry_to_file_chunked( $zip_path, array $entry_meta, $dest_path, &$partial_extract, $deadline ) {
-		$parent_dir = dirname( $dest_path );
-		if ( ! is_dir( $parent_dir ) && ! wp_mkdir_p( $parent_dir ) ) {
-			return new WP_Error( 'mkdir_failed', 'Could not create directory: ' . $parent_dir );
+	public static function extract_entry_to_file_chunked( $zip_path, array $entry_meta, $dest_path, $allowed_root, &$partial_extract, $deadline, $prepend_php_guard = false ) {
+		// Strict anti-symlink & realpath boundary check BEFORE touching or creating any path!
+		$safe_check = LDSM_Storage::prepare_safe_write_target( $dest_path, $allowed_root );
+		if ( is_wp_error( $safe_check ) ) {
+			return $safe_check;
 		}
 
-		$comp_size = (int) $entry_meta['comp_size'];
-		$method    = (int) $entry_meta['method'];
+		$comp_size  = (int) $entry_meta['comp_size'];
+		$method     = (int) $entry_meta['method'];
+		$guard_head = $prepend_php_guard ? LDSM_Storage::PHP_EXIT_GUARD : '';
+		$guard_len  = strlen( $guard_head );
 
 		if ( 0 === $comp_size ) {
-			@file_put_contents( $dest_path, '' );
+			if ( is_link( $dest_path ) ) {
+				return new WP_Error( 'symlink_blocked', 'Refusing to write to symbolic link.' );
+			}
+			@file_put_contents( $dest_path, $guard_head );
 			$partial_extract = null;
 			return true;
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, 'rb' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open ZIP archive for extraction.' );
@@ -313,6 +383,7 @@ class LWPM_Stream_Zip_Reader {
 		} else {
 			$data_offset = self::resolve_entry_data_offset( $fp, (int) $entry_meta['offset'] );
 			if ( is_wp_error( $data_offset ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return $data_offset;
 			}
@@ -321,32 +392,50 @@ class LWPM_Stream_Zip_Reader {
 
 		if ( 0 === $method ) {
 			if ( 0 !== @fseek( $fp, $data_offset + $bytes_done, SEEK_SET ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_seek_failed', 'Cannot seek to stored file payload.' );
 			}
 
+			if ( is_link( $dest_path ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+				fclose( $fp );
+				return new WP_Error( 'symlink_blocked', 'Refusing to open symbolic link.' );
+			}
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 			$out = @fopen( $dest_path, $bytes_done > 0 && file_exists( $dest_path ) ? 'r+b' : 'wb' );
 			if ( ! $out ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
-				return new WP_Error( 'dest_open_failed', 'Cannot write extracted file: ' . $dest_path );
+				return new WP_Error( 'dest_open_failed', 'Cannot write extracted file.' );
 			}
-			if ( $bytes_done > 0 ) {
-				@fseek( $out, $bytes_done, SEEK_SET );
+			if ( 0 === $bytes_done && $guard_len > 0 ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				fwrite( $out, $guard_head );
+			} elseif ( $bytes_done > 0 ) {
+				@fseek( $out, $guard_len + $bytes_done, SEEK_SET );
 			}
 
 			$slice = 2 * 1024 * 1024;
 			while ( $bytes_done < $comp_size ) {
 				$to_read = min( $slice, $comp_size - $bytes_done );
-				$buf     = fread( $fp, $to_read );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+				$buf = fread( $fp, $to_read );
 				if ( false === $buf || '' === $buf ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $out );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return new WP_Error( 'zip_eof', 'Unexpected EOF while extracting stored file: ' . $entry_meta['name'] );
 				}
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 				if ( false === fwrite( $out, $buf ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $out );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
-					return new WP_Error( 'dest_write_failed', 'Disk write error extracting: ' . $dest_path );
+					return new WP_Error( 'dest_write_failed', 'Disk write error extracting entry.' );
 				}
 				$bytes_done += strlen( $buf );
 
@@ -356,13 +445,17 @@ class LWPM_Stream_Zip_Reader {
 						'data_offset' => $data_offset,
 						'bytes_done'  => $bytes_done,
 					);
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $out );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return false;
 				}
 			}
 
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $out );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			$partial_extract = null;
 			return true;
@@ -370,12 +463,14 @@ class LWPM_Stream_Zip_Reader {
 
 		if ( 8 === $method ) {
 			if ( 0 !== @fseek( $fp, $data_offset, SEEK_SET ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_seek_failed', 'Cannot seek to deflated file payload.' );
 			}
 
 			if ( $comp_size <= 6 * 1024 * 1024 ) {
 				$comp_bytes = self::fread_exact( $fp, $comp_size );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				if ( false === $comp_bytes ) {
 					return new WP_Error( 'zip_read_failed', 'Failed reading compressed entry: ' . $entry_meta['name'] );
@@ -385,8 +480,11 @@ class LWPM_Stream_Zip_Reader {
 				if ( false === $raw ) {
 					return new WP_Error( 'inflate_failed', 'Failed inflating entry: ' . $entry_meta['name'] );
 				}
-				if ( false === @file_put_contents( $dest_path, $raw ) ) {
-					return new WP_Error( 'dest_write_failed', 'Failed writing extracted file: ' . $dest_path );
+				if ( is_link( $dest_path ) ) {
+					return new WP_Error( 'symlink_blocked', 'Refusing to write inflated entry to symbolic link.' );
+				}
+				if ( false === @file_put_contents( $dest_path, $guard_head . $raw ) ) {
+					return new WP_Error( 'dest_write_failed', 'Failed writing extracted file.' );
 				}
 				$partial_extract = null;
 				return true;
@@ -394,9 +492,10 @@ class LWPM_Stream_Zip_Reader {
 
 			if ( ! function_exists( 'inflate_init' ) || ! function_exists( 'inflate_add' ) ) {
 				$comp_bytes = self::fread_exact( $fp, $comp_size );
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				$raw = ( false !== $comp_bytes ) ? @gzinflate( $comp_bytes ) : false;
-				if ( false === $raw || false === @file_put_contents( $dest_path, $raw ) ) {
+				if ( is_link( $dest_path ) || false === $raw || false === @file_put_contents( $dest_path, $guard_head . $raw ) ) {
 					return new WP_Error( 'inflate_failed', 'Failed decompressing large entry: ' . $entry_meta['name'] );
 				}
 				$partial_extract = null;
@@ -405,44 +504,68 @@ class LWPM_Stream_Zip_Reader {
 
 			$inflate_ctx = @inflate_init( ZLIB_ENCODING_RAW );
 			if ( false === $inflate_ctx ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'inflate_init_failed', 'Could not initialize streaming zlib inflater.' );
 			}
 
+			if ( is_link( $dest_path ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+				fclose( $fp );
+				return new WP_Error( 'symlink_blocked', 'Refusing to write to symbolic link.' );
+			}
+
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 			$out = @fopen( $dest_path, 'wb' );
 			if ( ! $out ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
-				return new WP_Error( 'dest_open_failed', 'Cannot open target file for writing: ' . $dest_path );
+				return new WP_Error( 'dest_open_failed', 'Cannot open target file for writing.' );
+			}
+			if ( $guard_len > 0 ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+				fwrite( $out, $guard_head );
 			}
 
 			$remaining = $comp_size;
 			while ( $remaining > 0 ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 				$chunk = fread( $fp, min( 1024 * 1024, $remaining ) );
 				if ( false === $chunk || '' === $chunk ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $out );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return new WP_Error( 'zip_eof', 'Unexpected EOF during streaming inflate.' );
 				}
 				$remaining -= strlen( $chunk );
 				$decoded    = @inflate_add( $inflate_ctx, $chunk, 0 === $remaining ? ZLIB_FINISH : ZLIB_NO_FLUSH );
 				if ( false === $decoded ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $out );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return new WP_Error( 'inflate_corrupt', 'Corrupt deflate stream in entry: ' . $entry_meta['name'] );
 				}
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 				if ( '' !== $decoded && false === fwrite( $out, $decoded ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $out );
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
-					return new WP_Error( 'dest_write_failed', 'Disk write failed while inflating: ' . $dest_path );
+					return new WP_Error( 'dest_write_failed', 'Disk write failed while inflating.' );
 				}
 			}
 
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $out );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			$partial_extract = null;
 			return true;
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 		return new WP_Error( 'unsupported_zip_method', 'Unsupported ZIP compression method: ' . $method );
 	}
@@ -591,6 +714,7 @@ class LWPM_Stream_Zip_Reader {
 		$data = '';
 		$rem  = $length;
 		while ( $rem > 0 && ! feof( $fp ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$chunk = fread( $fp, min( 1024 * 1024, $rem ) );
 			if ( false === $chunk || '' === $chunk ) {
 				break;

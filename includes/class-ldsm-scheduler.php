@@ -1,6 +1,6 @@
 <?php
 /**
- * Automated Scheduled Backup Engine & Chunked WP-Cron Runner — Liberty WP Migrator.
+ * Automated Scheduled Backup Engine & Chunked WP-Cron Runner — LibertyDev Site Migrator.
  *
  * Supports 6-hour, 12-hour, daily, weekly, bi-weekly, and monthly automated backups,
  * executing in time-boxed background slices with automatic retention pruning & email notifications.
@@ -10,13 +10,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_Scheduler {
+class LDSM_Scheduler {
 
-	const HOOK_TRIGGER  = 'lwpm_run_scheduled_backup';
-	const HOOK_CONTINUE = 'lwpm_continue_scheduled_backup';
-	const OPT_SETTINGS  = 'lwpm_schedule_settings';
-	const OPT_STATUS    = 'lwpm_schedule_status';
-	const LOCK_KEY      = 'lwpm_bg_runner_lock';
+	const HOOK_TRIGGER  = 'ldsm_run_scheduled_backup';
+	const HOOK_CONTINUE = 'ldsm_continue_scheduled_backup';
+	const OPT_SETTINGS  = 'ldsm_schedule_settings';
+	const OPT_STATUS    = 'ldsm_schedule_status';
+	const LOCK_KEY      = 'ldsm_bg_runner_lock';
 
 	/**
 	 * Register cron schedules and action hooks.
@@ -28,35 +28,35 @@ class LWPM_Scheduler {
 	}
 
 	/**
-	 * Register custom LibertyDev backup intervals in WP-Cron.
+	 * Register custom backup intervals in WP-Cron.
 	 *
 	 * @param array $schedules Existing WP-Cron schedules.
 	 * @return array
 	 */
 	public static function register_cron_intervals( $schedules ) {
-		$schedules['lwpm_every_6h'] = array(
+		$schedules['ldsm_every_6h'] = array(
 			'interval' => 6 * HOUR_IN_SECONDS,
-			'display'  => 'Every 6 Hours (Liberty Migrator)',
+			'display'  => __( 'Every 6 Hours (LibertyDev Site Migrator)', 'libertydev-site-migrator' ),
 		);
-		$schedules['lwpm_twicedaily'] = array(
+		$schedules['ldsm_twicedaily'] = array(
 			'interval' => 12 * HOUR_IN_SECONDS,
-			'display'  => 'Every 12 Hours (Liberty Migrator)',
+			'display'  => __( 'Every 12 Hours (LibertyDev Site Migrator)', 'libertydev-site-migrator' ),
 		);
-		$schedules['lwpm_daily'] = array(
+		$schedules['ldsm_daily'] = array(
 			'interval' => DAY_IN_SECONDS,
-			'display'  => 'Daily (Liberty Migrator)',
+			'display'  => __( 'Daily (LibertyDev Site Migrator)', 'libertydev-site-migrator' ),
 		);
-		$schedules['lwpm_weekly'] = array(
+		$schedules['ldsm_weekly'] = array(
 			'interval' => WEEK_IN_SECONDS,
-			'display'  => 'Weekly (Liberty Migrator)',
+			'display'  => __( 'Weekly (LibertyDev Site Migrator)', 'libertydev-site-migrator' ),
 		);
-		$schedules['lwpm_biweekly'] = array(
+		$schedules['ldsm_biweekly'] = array(
 			'interval' => 2 * WEEK_IN_SECONDS,
-			'display'  => 'Every 2 Weeks (Liberty Migrator)',
+			'display'  => __( 'Every 2 Weeks (LibertyDev Site Migrator)', 'libertydev-site-migrator' ),
 		);
-		$schedules['lwpm_monthly'] = array(
+		$schedules['ldsm_monthly'] = array(
 			'interval' => 30 * DAY_IN_SECONDS,
-			'display'  => 'Monthly / 30 Days (Liberty Migrator)',
+			'display'  => __( 'Monthly / 30 Days (LibertyDev Site Migrator)', 'libertydev-site-migrator' ),
 		);
 		return $schedules;
 	}
@@ -69,10 +69,10 @@ class LWPM_Scheduler {
 	public static function get_default_settings() {
 		return array(
 			'enabled'            => false,
-			'frequency'          => 'lwpm_daily',
-			'day_of_week'        => 5, // Friday default for weekly.
+			'frequency'          => 'ldsm_daily',
+			'day_of_week'        => 5,
 			'run_time'           => '03:00',
-			'retention'          => 5, // Keep last 5 scheduled backups by default.
+			'retention'          => 5,
 			'exclude_cache'      => true,
 			'exclude_transients' => true,
 			'exclude_revisions'  => false,
@@ -99,22 +99,22 @@ class LWPM_Scheduler {
 	/**
 	 * Validate, persist, and synchronize schedule settings with WP-Cron.
 	 *
-	 * @param array $input Raw user settings from AJAX.
+	 * @param array $input Sanitized user settings from AJAX.
 	 * @return array<string,mixed> Updated status payload for UI.
 	 */
 	public static function update_settings( array $input ) {
 		$valid_freqs = array(
-			'lwpm_every_6h',
-			'lwpm_twicedaily',
-			'lwpm_daily',
-			'lwpm_weekly',
-			'lwpm_biweekly',
-			'lwpm_monthly',
+			'ldsm_every_6h',
+			'ldsm_twicedaily',
+			'ldsm_daily',
+			'ldsm_weekly',
+			'ldsm_biweekly',
+			'ldsm_monthly',
 		);
 
-		$freq = isset( $input['frequency'] ) ? sanitize_key( (string) $input['frequency'] ) : 'lwpm_daily';
+		$freq = isset( $input['frequency'] ) ? sanitize_key( (string) $input['frequency'] ) : 'ldsm_daily';
 		if ( ! in_array( $freq, $valid_freqs, true ) ) {
-			$freq = 'lwpm_daily';
+			$freq = 'ldsm_daily';
 		}
 
 		$day = isset( $input['day_of_week'] ) ? (int) $input['day_of_week'] : 5;
@@ -122,7 +122,7 @@ class LWPM_Scheduler {
 			$day = 5;
 		}
 
-		$run_time = isset( $input['run_time'] ) ? trim( (string) $input['run_time'] ) : '03:00';
+		$run_time = isset( $input['run_time'] ) ? sanitize_text_field( trim( (string) $input['run_time'] ) ) : '03:00';
 		if ( 1 !== preg_match( '/^([01]\d|2[0-3]):([0-5]\d)$/', $run_time ) ) {
 			$run_time = '03:00';
 		}
@@ -152,9 +152,8 @@ class LWPM_Scheduler {
 		update_option( self::OPT_SETTINGS, $clean, false );
 		self::sync_cron_with_settings( $clean );
 
-		// Apply retention immediately if user lowered limit.
 		if ( $clean['retention'] > 0 ) {
-			LWPM_Storage::enforce_scheduled_retention( $clean['retention'] );
+			LDSM_Storage::enforce_scheduled_retention( $clean['retention'] );
 		}
 
 		return self::get_status_payload();
@@ -207,13 +206,12 @@ class LWPM_Scheduler {
 		$min   = isset( $parts[1] ) ? (int) $parts[1] : 0;
 
 		try {
-			$tz  = function_exists( 'wp_timezone' ) ? wp_timezone() : new DateTimeZone( 'UTC' );
-			$now = new DateTimeImmutable( 'now', $tz );
-
+			$tz        = function_exists( 'wp_timezone' ) ? wp_timezone() : new DateTimeZone( 'UTC' );
+			$now       = new DateTimeImmutable( 'now', $tz );
 			$candidate = $now->setTime( $hour, $min, 0 );
 
-			if ( 'lwpm_weekly' === $frequency ) {
-				$curr_w    = (int) $now->format( 'w' ); // 0 = Sun .. 6 = Sat.
+			if ( 'ldsm_weekly' === $frequency ) {
+				$curr_w    = (int) $now->format( 'w' );
 				$days_diff = ( $day_of_week - $curr_w + 7 ) % 7;
 				$candidate = $candidate->modify( '+' . $days_diff . ' days' );
 				if ( $candidate->getTimestamp() <= ( time() + 60 ) ) {
@@ -222,15 +220,14 @@ class LWPM_Scheduler {
 				return $candidate->getTimestamp();
 			}
 
-			if ( 'lwpm_every_6h' === $frequency || 'lwpm_twicedaily' === $frequency ) {
-				$step_hours = ( 'lwpm_every_6h' === $frequency ) ? 6 : 12;
+			if ( 'ldsm_every_6h' === $frequency || 'ldsm_twicedaily' === $frequency ) {
+				$step_hours = ( 'ldsm_every_6h' === $frequency ) ? 6 : 12;
 				while ( $candidate->getTimestamp() <= ( time() + 60 ) ) {
 					$candidate = $candidate->modify( '+' . $step_hours . ' hours' );
 				}
 				return $candidate->getTimestamp();
 			}
 
-			// Daily, Bi-Weekly, Monthly: start today at HH:MM if still in the future, else tomorrow at HH:MM.
 			if ( $candidate->getTimestamp() <= ( time() + 60 ) ) {
 				$candidate = $candidate->modify( '+1 day' );
 			}
@@ -252,7 +249,6 @@ class LWPM_Scheduler {
 			$status = array();
 		}
 
-		// Ensure WP-Cron event exists if enabled (self-healing if cron array was cleared externally).
 		$next_ts = wp_next_scheduled( self::HOOK_TRIGGER );
 		if ( ! empty( $settings['enabled'] ) && ! $next_ts ) {
 			self::sync_cron_with_settings( $settings );
@@ -307,8 +303,8 @@ class LWPM_Scheduler {
 			'include_custom_tables' => false,
 		);
 
-		$note  = 'Automated (' . str_replace( 'lwpm_', '', (string) $settings['frequency'] ) . ')';
-		$start = LWPM_Exporter::start_job( $export_opts, 'scheduled', $note );
+		$note  = 'Automated (' . str_replace( 'ldsm_', '', (string) $settings['frequency'] ) . ')';
+		$start = LDSM_Exporter::start_job( $export_opts, 'scheduled', $note );
 
 		delete_transient( self::LOCK_KEY );
 
@@ -326,7 +322,7 @@ class LWPM_Scheduler {
 	 * @param string $job_id Scheduled export job ID.
 	 */
 	public static function handle_continue_backup( $job_id ) {
-		if ( ! LWPM_Storage::is_valid_job_id( $job_id ) ) {
+		if ( ! LDSM_Storage::is_valid_job_id( $job_id ) ) {
 			return;
 		}
 		self::process_background_slices( $job_id );
@@ -351,7 +347,7 @@ class LWPM_Scheduler {
 		$finished  = false;
 
 		while ( microtime( true ) < $slice_end ) {
-			$tick = LWPM_Exporter::run_tick( $job_id, 3.5 );
+			$tick = LDSM_Exporter::run_tick( $job_id, 3.5 );
 
 			if ( is_wp_error( $tick ) ) {
 				delete_transient( self::LOCK_KEY );
@@ -374,7 +370,6 @@ class LWPM_Scheduler {
 
 		delete_transient( self::LOCK_KEY );
 
-		// Still has remaining chunks — schedule immediate continuation and trigger non-blocking cron loopback.
 		if ( ! $finished ) {
 			if ( ! wp_next_scheduled( self::HOOK_CONTINUE, array( $job_id ) ) ) {
 				wp_schedule_single_event( time() + 2, self::HOOK_CONTINUE, array( $job_id ) );
@@ -386,7 +381,7 @@ class LWPM_Scheduler {
 	}
 
 	/**
-	 * Record last scheduled backup status & send optional notification email.
+	 * Record last scheduled backup status & send optional notification email (zero credit/promotional links per Guideline 10).
 	 *
 	 * @param bool   $ok         Whether backup succeeded.
 	 * @param string $filename   Archive filename.
@@ -407,22 +402,20 @@ class LWPM_Scheduler {
 		if ( ! empty( $settings['notify_enabled'] ) && ! empty( $settings['notify_email'] ) && is_email( $settings['notify_email'] ) ) {
 			$site_name = wp_specialchars_decode( get_option( 'blogname' ), ENT_QUOTES );
 			if ( $ok ) {
-				$subject = sprintf( '[%s] Liberty WP Migrator — Scheduled Backup Completed', $site_name );
+				$subject = sprintf( '[%s] Scheduled Backup Completed', $site_name );
 				$body    = "Hello,\n\n";
-				$body   .= "Your automated scheduled WordPress backup has completed successfully.\n\n";
+				$body   .= "Your automated scheduled site backup has completed successfully.\n\n";
 				$body   .= 'Site URL: ' . home_url() . "\n";
 				$body   .= 'Archive File: ' . $filename . "\n";
 				$body   .= 'Archive Size: ' . $size_human . "\n";
 				$body   .= 'Completed At: ' . wp_date( 'Y-m-d H:i:s' ) . "\n\n";
-				$body   .= 'Manage Backups: ' . admin_url( 'admin.php?page=liberty-wp-migrator' ) . "\n\n";
-				$body   .= "— Powered by LibertyDev (Liberty WP Migrator)\n";
+				$body   .= 'Manage Backups: ' . admin_url( 'admin.php?page=libertydev-site-migrator' ) . "\n";
 			} else {
-				$subject = sprintf( '[%s] Liberty WP Migrator — Scheduled Backup Failed', $site_name );
+				$subject = sprintf( '[%s] Scheduled Backup Failed', $site_name );
 				$body    = "Hello,\n\n";
-				$body   .= "An error occurred while running your automated scheduled backup:\n\n";
+				$body   .= "An error occurred while running your automated scheduled site backup:\n\n";
 				$body   .= 'Error: ' . $error_msg . "\n";
-				$body   .= 'Site URL: ' . home_url() . "\n\n";
-				$body   .= "— Powered by LibertyDev (Liberty WP Migrator)\n";
+				$body   .= 'Site URL: ' . home_url() . "\n";
 			}
 			@wp_mail( $settings['notify_email'], $subject, $body );
 		}

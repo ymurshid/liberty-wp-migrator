@@ -1,13 +1,13 @@
 <?php
 /**
- * Byte-Exact Serialization-Safe & JSON-Safe Search-and-Replace Engine — Liberty WP Migrator.
+ * Byte-Exact Serialization-Safe & JSON-Safe Search-and-Replace Engine — LibertyDev Site Migrator.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_Replacer {
+class LDSM_Replacer {
 
 	/**
 	 * Maximum recursion depth for nested serialized/JSON payloads.
@@ -106,21 +106,22 @@ class LWPM_Replacer {
 	}
 
 	/**
-	 * Build comprehensive URL, path, and custom replacement maps from source manifest to current WP site.
+	 * Build comprehensive URL, path (including relocated plugins/themes/uploads), and custom replacement maps.
+	 *
+	 * @param array $manifest        Source site manifest.
+	 * @param array $dest_info       Destination site info.
+	 * @param array $custom_replaces Optional custom replace rules.
+	 * @return LDSM_Replacer
 	 */
 	public static function from_migration_context( array $manifest, array $dest_info, array $custom_replaces = array() ) {
 		$raw_map   = array();
 		$json_map  = array();
 		$url_pairs = array();
 
-		if ( ! empty( $manifest['uploads_url'] ) && ! empty( $dest_info['uploads_url'] ) ) {
-			$url_pairs[] = array( $manifest['uploads_url'], $dest_info['uploads_url'] );
-		}
-		if ( ! empty( $manifest['site_url'] ) && ! empty( $dest_info['site_url'] ) ) {
-			$url_pairs[] = array( $manifest['site_url'], $dest_info['site_url'] );
-		}
-		if ( ! empty( $manifest['home_url'] ) && ! empty( $dest_info['home_url'] ) ) {
-			$url_pairs[] = array( $manifest['home_url'], $dest_info['home_url'] );
+		foreach ( array( 'uploads_url', 'plugins_url', 'content_url', 'site_url', 'home_url' ) as $url_key ) {
+			if ( ! empty( $manifest[ $url_key ] ) && ! empty( $dest_info[ $url_key ] ) ) {
+				$url_pairs[] = array( $manifest[ $url_key ], $dest_info[ $url_key ] );
+			}
 		}
 
 		foreach ( $url_pairs as $pair ) {
@@ -128,14 +129,10 @@ class LWPM_Replacer {
 		}
 
 		$path_pairs = array();
-		if ( ! empty( $manifest['uploads_path'] ) && ! empty( $dest_info['uploads_path'] ) ) {
-			$path_pairs[] = array( $manifest['uploads_path'], $dest_info['uploads_path'] );
-		}
-		if ( ! empty( $manifest['wp_content_dir'] ) && ! empty( $dest_info['wp_content_dir'] ) ) {
-			$path_pairs[] = array( $manifest['wp_content_dir'], $dest_info['wp_content_dir'] );
-		}
-		if ( ! empty( $manifest['abspath'] ) && ! empty( $dest_info['abspath'] ) ) {
-			$path_pairs[] = array( $manifest['abspath'], $dest_info['abspath'] );
+		foreach ( array( 'uploads_path', 'plugins_path', 'mu_plugins_path', 'themes_path', 'languages_path', 'abspath' ) as $path_key ) {
+			if ( ! empty( $manifest[ $path_key ] ) && ! empty( $dest_info[ $path_key ] ) ) {
+				$path_pairs[] = array( $manifest[ $path_key ], $dest_info[ $path_key ] );
+			}
 		}
 
 		foreach ( $path_pairs as $pp ) {
@@ -207,8 +204,8 @@ class LWPM_Replacer {
 	 * Register forward-slash, Windows-backslash, and JSON-escaped filesystem path variants.
 	 */
 	private static function register_path_variants( $old_path, $new_path, array &$raw_map, array &$json_map ) {
-		$old_fwd = LWPM_Storage::normalize_path( $old_path );
-		$new_fwd = LWPM_Storage::normalize_path( $new_path );
+		$old_fwd = LDSM_Storage::normalize_path( $old_path );
+		$new_fwd = LDSM_Storage::normalize_path( $new_path );
 
 		if ( strlen( $old_fwd ) < 4 || '' === $new_fwd || $old_fwd === $new_fwd ) {
 			return;

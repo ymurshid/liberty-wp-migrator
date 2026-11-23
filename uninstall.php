@@ -1,59 +1,52 @@
 <?php
 /**
- * Uninstall handler for Liberty WP Migrator by LibertyDev.
+ * Uninstall handler for LibertyDev Site Migrator.
  *
- * Unschedules WP-Cron events, deletes temporary job workspaces and plugin options,
- * while preserving completed .zip backups unless the user already deleted them.
+ * Unschedules WP-Cron events, cleans temporary job workspaces and plugin options,
+ * while preserving completed .zip backups unless already deleted by the administrator.
  */
 
 if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 	exit;
 }
 
-wp_clear_scheduled_hook( 'lwpm_run_scheduled_backup' );
-wp_clear_scheduled_hook( 'lwpm_continue_scheduled_backup' );
+wp_clear_scheduled_hook( 'ldsm_run_scheduled_backup' );
+wp_clear_scheduled_hook( 'ldsm_continue_scheduled_backup' );
 
-delete_option( 'lwpm_maintenance_active' );
-delete_option( 'lwpm_needs_rewrite_flush' );
-delete_option( 'lwpm_schedule_settings' );
-delete_option( 'lwpm_schedule_status' );
-delete_transient( 'lwpm_bg_runner_lock' );
+$vault_key = get_option( 'ldsm_vault_key', '' );
 
-$backups_dir = WP_CONTENT_DIR . '/lwpm-backups';
-$jobs_dir    = $backups_dir . '/jobs';
+delete_option( 'ldsm_maintenance_active' );
+delete_option( 'ldsm_needs_rewrite_flush' );
+delete_option( 'ldsm_schedule_settings' );
+delete_option( 'ldsm_schedule_status' );
+delete_transient( 'ldsm_bg_runner_lock' );
 
-/**
- * Recursively remove a directory.
- *
- * @param string $dir Directory path.
- */
-function lwpm_uninstall_rrmdir( $dir ) {
-	if ( ! is_dir( $dir ) ) {
-		return;
-	}
-	$items = @scandir( $dir );
-	if ( ! is_array( $items ) ) {
-		return;
-	}
-	foreach ( $items as $item ) {
-		if ( '.' === $item || '..' === $item ) {
-			continue;
+$uploads = wp_upload_dir( null, false );
+if ( ! empty( $uploads['basedir'] ) ) {
+	$base_dir = rtrim( str_replace( '\\', '/', (string) $uploads['basedir'] ), '/' ) . '/libertydev-site-migrator';
+
+	if ( is_dir( $base_dir ) ) {
+		if ( ! function_exists( 'WP_Filesystem' ) ) {
+			require_once ABSPATH . 'wp-admin/includes/file.php';
 		}
-		$path = $dir . '/' . $item;
-		if ( is_dir( $path ) && ! is_link( $path ) ) {
-			lwpm_uninstall_rrmdir( $path );
-		} else {
-			wp_delete_file( $path );
+		WP_Filesystem();
+		global $wp_filesystem;
+
+		if ( is_string( $vault_key ) && '' !== $vault_key && preg_match( '/^[a-f0-9]{16,64}$/', $vault_key ) ) {
+			$vault_dir = $base_dir . '/vault-' . $vault_key;
+			$jobs_dir  = $vault_dir . '/jobs';
+
+			if ( $wp_filesystem && is_dir( $jobs_dir ) ) {
+				$wp_filesystem->delete( $jobs_dir, true );
+			}
+
+			$remaining_zips = glob( $vault_dir . '/*.zip' );
+			if ( empty( $remaining_zips ) ) {
+				delete_option( 'ldsm_vault_key' );
+				if ( $wp_filesystem ) {
+					$wp_filesystem->delete( $base_dir, true );
+				}
+			}
 		}
-	}
-	@rmdir( $dir );
-}
-
-lwpm_uninstall_rrmdir( $jobs_dir );
-
-if ( is_dir( $backups_dir ) ) {
-	$remaining_zips = glob( $backups_dir . '/*.zip' );
-	if ( empty( $remaining_zips ) ) {
-		lwpm_uninstall_rrmdir( $backups_dir );
 	}
 }

@@ -1,25 +1,25 @@
 <?php
 /**
- * Time-Boxed Shadow-Table Database Importer, Collation Normalizer & Atomic Swapper — Liberty WP Migrator.
+ * Time-Boxed Shadow-Table Database Importer, Collation Normalizer & Atomic Swapper — LibertyDev Site Migrator.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_DB_Importer {
+class LDSM_DB_Importer {
 
 	/**
-	 * Execute a time-boxed step importing SQL statements from $sql_filepath into shadow tables.
+	 * Execute a time-boxed step importing SQL statements from PHP-guarded $sql_php_filepath into shadow tables.
 	 */
-	public static function import_sql_step( array &$state, $sql_filepath, $deadline ) {
+	public static function import_sql_step( array &$state, $sql_php_filepath, $deadline ) {
 		global $wpdb;
 
-		if ( ! is_file( $sql_filepath ) || ! is_readable( $sql_filepath ) ) {
-			return new WP_Error( 'sql_missing', 'Extracted database.sql file is missing or unreadable.' );
+		if ( ! is_file( $sql_php_filepath ) || is_link( $sql_php_filepath ) || ! is_readable( $sql_php_filepath ) ) {
+			return new WP_Error( 'sql_missing', 'Extracted database dump file is missing or unreadable.' );
 		}
 
-		$total_sql_bytes = (int) @filesize( $sql_filepath );
+		$total_sql_bytes = (int) @filesize( $sql_php_filepath );
 		if ( ! isset( $state['sql_byte_offset'] ) ) {
 			$state['sql_byte_offset']    = 0;
 			$state['sql_total_bytes']    = max( 1, $total_sql_bytes );
@@ -29,18 +29,23 @@ class LWPM_DB_Importer {
 			$state['supports_0900']      = self::server_supports_collation( 'utf8mb4_0900_ai_ci' );
 		}
 
-		$fp = @fopen( $sql_filepath, 'rb' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+		$fp = @fopen( $sql_php_filepath, 'rb' );
 		if ( ! $fp ) {
-			return new WP_Error( 'sql_open_failed', 'Cannot open database.sql for reading.' );
+			return new WP_Error( 'sql_open_failed', 'Cannot open database dump for reading.' );
 		}
 
 		if ( 0 !== @fseek( $fp, (int) $state['sql_byte_offset'], SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
-			return new WP_Error( 'sql_seek_failed', 'Failed seeking to offset in database.sql.' );
+			return new WP_Error( 'sql_seek_failed', 'Failed seeking to offset in database dump.' );
 		}
 
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( 'SET NAMES utf8mb4' );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 0' );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO'" );
 
 		$dest_prefix   = (string) $state['dest_info']['table_prefix'];
@@ -57,25 +62,30 @@ class LWPM_DB_Importer {
 			}
 
 			$trimmed = trim( $line );
-			if ( '' === $trimmed ) {
+			if ( '' === $trimmed || 0 === strpos( $trimmed, '<?php' ) ) {
 				$state['sql_byte_offset'] = (int) ftell( $fp );
 				continue;
 			}
 
-			// Support #LWPM# (and legacy #OWPM#) framed SQL statements.
-			if ( 0 === strpos( $trimmed, '-- #LWPM#' ) || 0 === strpos( $trimmed, '-- #OWPM#' ) ) {
+			if (
+				0 === strpos( $trimmed, '-- #LDSM#' ) ||
+				0 === strpos( $trimmed, '-- #LWPM#' ) ||
+				0 === strpos( $trimmed, '-- #OWPM#' )
+			) {
 				$json_part = substr( $trimmed, 9 );
 				$meta      = json_decode( $json_part, true );
 				if ( ! is_array( $meta ) || ! isset( $meta['bytes'] ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
-					return new WP_Error( 'sql_frame_corrupt', 'Corrupt statement frame in database.sql.' );
+					return new WP_Error( 'sql_frame_corrupt', 'Corrupt statement frame in database dump.' );
 				}
 
 				$byte_len = (int) $meta['bytes'];
 				$sql_raw  = self::fread_exact( $fp, $byte_len );
 				if ( false === $sql_raw ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
-					return new WP_Error( 'sql_unexpected_eof', 'Unexpected end of database.sql while reading statement.' );
+					return new WP_Error( 'sql_unexpected_eof', 'Unexpected end of database dump while reading statement.' );
 				}
 
 				$exec_res = self::execute_framed_statement(
@@ -88,6 +98,7 @@ class LWPM_DB_Importer {
 				);
 
 				if ( is_wp_error( $exec_res ) ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return $exec_res;
 				}
@@ -95,6 +106,7 @@ class LWPM_DB_Importer {
 				$state['sql_byte_offset'] = (int) ftell( $fp );
 
 				if ( microtime( true ) >= $deadline ) {
+					// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 					fclose( $fp );
 					return false;
 				}
@@ -106,6 +118,7 @@ class LWPM_DB_Importer {
 
 		$is_eof                   = feof( $fp );
 		$state['sql_byte_offset'] = (int) ftell( $fp );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		if ( $is_eof || $state['sql_byte_offset'] >= $total_sql_bytes ) {
@@ -148,7 +161,7 @@ class LWPM_DB_Importer {
 
 		if ( ! isset( $state['shadow_map'][ $src_table ] ) ) {
 			$idx          = count( $state['shadow_map'] );
-			$shadow_table = 'lwpmt_' . $job_short . '_' . $idx;
+			$shadow_table = 'ldsmt_' . $job_short . '_' . $idx;
 			$final_table  = $has_prefix ? ( $dest_prefix . $suffix ) : $src_table;
 
 			$state['shadow_map'][ $src_table ] = array(
@@ -177,7 +190,7 @@ class LWPM_DB_Importer {
 				'/\bCONSTRAINT\s+`([^`]+)`/i',
 				function ( $m ) use ( $job_short ) {
 					$base = substr( $m[1], 0, 48 );
-					return 'CONSTRAINT `' . $base . '_lw' . $job_short . '`';
+					return 'CONSTRAINT `' . $base . '_ld' . $job_short . '`';
 				},
 				$rewritten
 			);
@@ -226,7 +239,7 @@ class LWPM_DB_Importer {
 	/**
 	 * Run a time-boxed Serialization-Safe Search & Replace step across all shadow tables.
 	 */
-	public static function search_replace_step( array &$state, LWPM_Replacer $replacer, $deadline ) {
+	public static function search_replace_step( array &$state, LDSM_Replacer $replacer, $deadline ) {
 		global $wpdb;
 
 		if ( ! $replacer->has_rules() || empty( $state['shadow_list'] ) ) {
@@ -261,7 +274,7 @@ class LWPM_DB_Importer {
 			}
 
 			$cursor    = &$state['sr_table_cursor'];
-			$esc_table = LWPM_DB_Exporter::quote_ident( $shadow_table );
+			$esc_table = LDSM_DB_Exporter::quote_ident( $shadow_table );
 			$int_pk    = $cursor['int_pk'];
 			$pk_cols   = $cursor['pk_cols'];
 			$text_cols = $cursor['text_cols'];
@@ -270,11 +283,11 @@ class LWPM_DB_Importer {
 			if ( empty( $pk_cols ) ) {
 				$col_sql = '*';
 			} else {
-				$col_sql = implode( ',', array_map( array( 'LWPM_DB_Exporter', 'quote_ident' ), $select_cols ) );
+				$col_sql = implode( ',', array_map( array( 'LDSM_DB_Exporter', 'quote_ident' ), $select_cols ) );
 			}
 
 			if ( null !== $int_pk ) {
-				$esc_pk = LWPM_DB_Exporter::quote_ident( $int_pk );
+				$esc_pk = LDSM_DB_Exporter::quote_ident( $int_pk );
 				$where  = ( null !== $cursor['last_pk'] ) ? ( 'WHERE ' . $esc_pk . ' > ' . (int) $cursor['last_pk'] ) : '';
 				$query  = "SELECT {$col_sql} FROM {$esc_table} {$where} ORDER BY {$esc_pk} ASC LIMIT 300";
 			} else {
@@ -337,6 +350,7 @@ class LWPM_DB_Importer {
 	public static function finalize_and_atomic_swap( array &$state ) {
 		global $wpdb;
 
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 0' );
 
 		$source_prefix = isset( $state['manifest']['table_prefix'] ) ? (string) $state['manifest']['table_prefix'] : '';
@@ -349,7 +363,6 @@ class LWPM_DB_Importer {
 			}
 		}
 
-		// 1. Update table prefix keys in options & usermeta when source and destination prefixes differ.
 		if ( '' !== $source_prefix && $source_prefix !== $dest_prefix ) {
 			if ( isset( $shadow_by_suffix['options'] ) ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
@@ -379,12 +392,28 @@ class LWPM_DB_Importer {
 			}
 		}
 
-		// 2. Enforce destination siteurl & home, keep Liberty WP Migrator active, clear builder caches.
 		if ( isset( $shadow_by_suffix['options'] ) ) {
 			$opt_shadow = $shadow_by_suffix['options'];
 
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update( $opt_shadow, array( 'option_value' => $state['dest_info']['site_url'] ), array( 'option_name' => 'siteurl' ) );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update( $opt_shadow, array( 'option_value' => $state['dest_info']['home_url'] ), array( 'option_name' => 'home' ) );
+
+			// Preserve destination vault key across DB swap so existing server backups remain accessible!
+			if ( ! empty( $state['dest_vault_key'] ) ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE `option_name` = %s', $opt_shadow, 'ldsm_vault_key' ) );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$wpdb->insert(
+					$opt_shadow,
+					array(
+						'option_name'  => 'ldsm_vault_key',
+						'option_value' => (string) $state['dest_vault_key'],
+						'autoload'     => 'no',
+					)
+				);
+			}
 
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$active_raw = $wpdb->get_var(
@@ -394,12 +423,20 @@ class LWPM_DB_Importer {
 			if ( ! is_array( $active_arr ) ) {
 				$active_arr = array();
 			}
-			// Remove old omni slug if present and ensure liberty-wp-migrator is active.
-			$active_arr = array_values( array_diff( $active_arr, array( 'omni-wp-migrator/omni-wp-migrator.php' ) ) );
-			if ( ! in_array( LWPM_PLUGIN_BASENAME, $active_arr, true ) ) {
-				$active_arr[] = LWPM_PLUGIN_BASENAME;
+			$active_arr = array_values(
+				array_diff(
+					$active_arr,
+					array(
+						'omni-wp-migrator/omni-wp-migrator.php',
+						'liberty-wp-migrator/liberty-wp-migrator.php',
+					)
+				)
+			);
+			if ( ! in_array( LDSM_PLUGIN_BASENAME, $active_arr, true ) ) {
+				$active_arr[] = LDSM_PLUGIN_BASENAME;
 			}
 			sort( $active_arr );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update(
 				$opt_shadow,
 				array( 'option_value' => serialize( $active_arr ) ),
@@ -429,7 +466,6 @@ class LWPM_DB_Importer {
 			);
 		}
 
-		// 3. Optional: Preserve current logged-in Administrator account.
 		$preserved_user_id = null;
 		if (
 			! empty( $state['import_options']['keep_current_admin'] ) &&
@@ -444,9 +480,10 @@ class LWPM_DB_Importer {
 			);
 		}
 
-		// 4. Atomic RENAME TABLE swap!
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$existing_raw   = $wpdb->get_col( 'SHOW FULL TABLES WHERE Table_type = "BASE TABLE"', 0 );
 		$existing_set   = is_array( $existing_raw ) ? array_flip( $existing_raw ) : array();
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$existing_views = $wpdb->get_col( 'SHOW FULL TABLES WHERE Table_type = "VIEW"', 0 );
 		$views_set      = is_array( $existing_views ) ? array_flip( $existing_views ) : array();
 
@@ -465,13 +502,13 @@ class LWPM_DB_Importer {
 			}
 
 			if ( isset( $existing_set[ $final ] ) ) {
-				$old_tmp          = 'lwpmold_' . $job_short . '_' . $idx;
-				$old_drops[]      = LWPM_DB_Exporter::quote_ident( $old_tmp );
-				$rename_clauses[] = LWPM_DB_Exporter::quote_ident( $final ) . ' TO ' . LWPM_DB_Exporter::quote_ident( $old_tmp );
+				$old_tmp          = 'ldsmold_' . $job_short . '_' . $idx;
+				$old_drops[]      = LDSM_DB_Exporter::quote_ident( $old_tmp );
+				$rename_clauses[] = LDSM_DB_Exporter::quote_ident( $final ) . ' TO ' . LDSM_DB_Exporter::quote_ident( $old_tmp );
 				$idx++;
 			}
 
-			$rename_clauses[] = LWPM_DB_Exporter::quote_ident( $shadow ) . ' TO ' . LWPM_DB_Exporter::quote_ident( $final );
+			$rename_clauses[] = LDSM_DB_Exporter::quote_ident( $shadow ) . ' TO ' . LDSM_DB_Exporter::quote_ident( $final );
 		}
 
 		if ( ! empty( $rename_clauses ) ) {
@@ -493,7 +530,6 @@ class LWPM_DB_Importer {
 			}
 		}
 
-		// 5. Recreate deferred Views.
 		if ( ! empty( $state['deferred_views'] ) ) {
 			foreach ( $state['deferred_views'] as $v ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
@@ -503,6 +539,7 @@ class LWPM_DB_Importer {
 			}
 		}
 
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 1' );
 
 		return $preserved_user_id;
@@ -529,12 +566,14 @@ class LWPM_DB_Importer {
 
 		if ( $existing_id ) {
 			$target_id = (int) $existing_id;
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update(
 				$users_shadow,
 				array( 'user_pass' => $admin_data['user_pass'] ),
 				array( 'ID' => $target_id )
 			);
 		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->insert(
 				$users_shadow,
 				array(
@@ -570,8 +609,10 @@ class LWPM_DB_Importer {
 			)
 		);
 		if ( $has_cap ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update( $usermeta_shadow, array( 'meta_value' => $caps_val ), array( 'umeta_id' => (int) $has_cap ) );
 		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->insert(
 				$usermeta_shadow,
 				array(
@@ -592,8 +633,10 @@ class LWPM_DB_Importer {
 			)
 		);
 		if ( $has_lvl ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update( $usermeta_shadow, array( 'meta_value' => '10' ), array( 'umeta_id' => (int) $has_lvl ) );
 		} else {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->insert(
 				$usermeta_shadow,
 				array(
@@ -668,6 +711,7 @@ class LWPM_DB_Importer {
 			foreach ( $pk_cols as $pk ) {
 				$where[ $pk ] = $original_row[ $pk ];
 			}
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update( $shadow_table, $updates, $where );
 			return;
 		}
@@ -675,18 +719,18 @@ class LWPM_DB_Importer {
 		$set_parts   = array();
 		$where_parts = array();
 		foreach ( $updates as $col => $val ) {
-			$set_parts[] = LWPM_DB_Exporter::quote_ident( $col ) . " = '" . LWPM_DB_Exporter::escape_sql_string( (string) $val ) . "'";
+			$set_parts[] = LDSM_DB_Exporter::quote_ident( $col ) . " = '" . LDSM_DB_Exporter::escape_sql_string( (string) $val ) . "'";
 		}
 		foreach ( $original_row as $col => $val ) {
-			$qcol = LWPM_DB_Exporter::quote_ident( $col );
+			$qcol = LDSM_DB_Exporter::quote_ident( $col );
 			if ( null === $val ) {
 				$where_parts[] = "{$qcol} IS NULL";
 			} else {
-				$where_parts[] = "{$qcol} = '" . LWPM_DB_Exporter::escape_sql_string( (string) $val ) . "'";
+				$where_parts[] = "{$qcol} = '" . LDSM_DB_Exporter::escape_sql_string( (string) $val ) . "'";
 			}
 		}
 
-		$esc_table = LWPM_DB_Exporter::quote_ident( $shadow_table );
+		$esc_table = LDSM_DB_Exporter::quote_ident( $shadow_table );
 		$sql       = "UPDATE {$esc_table} SET " . implode( ', ', $set_parts ) . ' WHERE ' . implode( ' AND ', $where_parts ) . ' LIMIT 1';
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- PK-less custom table fallback update with escaped values.
 		$wpdb->query( $sql );
@@ -696,8 +740,8 @@ class LWPM_DB_Importer {
 	 * Replace the first occurrence of `$old_table` backticked identifier in a statement.
 	 */
 	private static function replace_first_table_ident( $sql, $old_table, $new_table ) {
-		$search  = LWPM_DB_Exporter::quote_ident( $old_table );
-		$replace = LWPM_DB_Exporter::quote_ident( $new_table );
+		$search  = LDSM_DB_Exporter::quote_ident( $old_table );
+		$replace = LDSM_DB_Exporter::quote_ident( $new_table );
 		$pos     = strpos( $sql, $search );
 		if ( false === $pos ) {
 			return $sql;
@@ -710,6 +754,7 @@ class LWPM_DB_Importer {
 	 */
 	private static function server_supports_collation( $collation ) {
 		global $wpdb;
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$found = $wpdb->get_var( $wpdb->prepare( 'SHOW COLLATION LIKE %s', $collation ) );
 		return ! empty( $found );
 	}
@@ -737,6 +782,7 @@ class LWPM_DB_Importer {
 		$buf = '';
 		$rem = $length;
 		while ( $rem > 0 && ! feof( $fp ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
 			$chunk = fread( $fp, min( 1024 * 1024, $rem ) );
 			if ( false === $chunk || '' === $chunk ) {
 				break;

@@ -1,25 +1,26 @@
-=== Liberty WP Migrator ===
+=== LibertyDev Site Migrator ===
 Contributors: yassermurshid
 Tags: migration, backup, clone, restore, transfer
 Requires at least: 6.2
 Tested up to: 7.1
-Stable tag: 1.2.0
+Stable tag: 1.3.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Unlimited-size WordPress site migration, one-click manual backups, and automated scheduled ZIP backups with serialization-safe domain replacement.
+Unlimited-size site migration, one-click manual backups, and automated scheduled ZIP backups with serialization-safe domain replacement.
 
 == Description ==
 
-**Liberty WP Migrator** by **LibertyDev** is a complete, zero-dependency WordPress site migration, cloning, manual backup, and automated scheduled backup solution engineered to run reliably on shared, VPS, and managed cloud hosting without timeouts or upload size barriers.
+**LibertyDev Site Migrator** is a complete, zero-dependency WordPress site migration, cloning, manual backup, and automated scheduled backup solution engineered to run reliably on shared, VPS, and managed cloud hosting without timeouts or upload size barriers.
 
-Move any WordPress site from staging to production—or between completely different domains, subdirectories, database table prefixes, and MySQL/MariaDB versions—using standard `.zip` archives.
+Move any WordPress site from staging to production—or between completely different domains, subdirectories, relocated content/uploads setups, database table prefixes, and MySQL/MariaDB versions—using standard `.zip` archives.
 
 = Key Features =
 
 * **Unlimited-Size Chunked Export & Import:** Every stage (filesystem scan, database dump, archive compression, upload slicing, extraction, and URL replacement) executes in small `2.5s` time-boxed AJAX batches to avoid `max_execution_time` timeouts.
 * **Adaptive Chunked File Upload:** Automatically slices large `.zip` archives in the browser below your server's `upload_max_filesize` and `post_max_size`, with automatic chunk downshifting if a reverse proxy (e.g., Nginx) responds with `413 Payload Too Large`.
+* **Canonical WordPress Directory Support:** Dynamically resolves `wp_upload_dir()`, `WP_PLUGIN_DIR`, `WPMU_PLUGIN_DIR`, `get_theme_root()`, and `WP_LANG_DIR`, supporting standard and custom relocated WordPress directory layouts out of the box.
 * **Pure-PHP Streaming ZIP / ZIP64 Engine:** Requires no `ZipArchive` (`ext-zip`) server extension, avoids `ZipArchive::close()` memory/timeout spikes on multi-GB sites, supports UTF-8 / Arabic filenames, and produces standard `.zip` files you can open on Windows, macOS, or Linux.
 * **Byte-Exact Serialization-Safe & JSON-Safe Domain Replacement:** Updates `https://`, `http://`, protocol-relative `//`, JSON-escaped `https:\/\/`, URL-encoded `https%3A%2F%2F`, and server filesystem paths across nested PHP serialized arrays/objects (including private/protected properties and PHP 8.1+ Enums) and JSON builders (**Elementor**, **Gutenberg**) without touching email addresses (`user@domain.com`).
 * **Atomic Shadow-Table Database Import:** Imports SQL data into isolated temporary shadow tables first, normalizes MySQL 8.0 (`utf8mb4_0900_*`) collations for MariaDB compatibility, adapts table prefixes automatically, and swaps tables atomically via `RENAME TABLE` so a live site is never left in a half-imported state.
@@ -28,13 +29,13 @@ Move any WordPress site from staging to production—or between completely diffe
 
 = Privacy & Data Handling =
 
-Liberty WP Migrator operates **100% locally on your own WordPress server**. It does not connect to any external SaaS API, does not transmit telemetry or user data to third-party servers, and stores all backup archives inside a protected local directory (`wp-content/lwpm-backups`) shielded with `.htaccess`, `web.config`, and authenticated download nonces.
+LibertyDev Site Migrator operates **100% locally on your own WordPress server**. It does not connect to any external SaaS API, does not transmit telemetry or user data to third-party servers, and stores all backup archives inside a cryptographically unguessable subdirectory within your WordPress uploads folder (`uploads/libertydev-site-migrator/vault-{key}/`) protected across Apache, Nginx, and IIS.
 
 == Installation ==
 
-1. In your WordPress Admin dashboard, navigate to **Plugins > Add New** and search for **Liberty WP Migrator** (or upload `liberty-wp-migrator.zip` via **Upload Plugin**).
+1. In your WordPress Admin dashboard, navigate to **Plugins > Add New** and search for **LibertyDev Site Migrator** (or upload `libertydev-site-migrator.zip` via **Upload Plugin**).
 2. Click **Install Now**, then click **Activate**.
-3. Open **Liberty Migrator** from the WordPress admin sidebar.
+3. Open **LibertyDev Migrator** from the WordPress admin sidebar.
 4. Use **Export Site** on your source site to create and download a compressed `.zip` archive, then upload that `.zip` under **Import Site** on your destination domain—or configure recurring backups under **Backup & Schedule**.
 
 == Frequently Asked Questions ==
@@ -45,19 +46,19 @@ No artificial size limits are imposed by the plugin. Exports stream directly to 
 
 = Will Elementor, Gutenberg, WooCommerce, or theme widgets break when changing domains? =
 
-No. Liberty WP Migrator uses a byte-exact PHP Serialization AST parser and type-preserving JSON walker (`stdClass` `{}` vs `array` `[]`) to update domain URLs and server paths accurately, and automatically clears stale Elementor CSS caches upon completion.
+No. LibertyDev Site Migrator uses a byte-exact PHP Serialization AST parser and type-preserving JSON walker (`stdClass` `{}` vs `array` `[]`) to update domain URLs and server paths accurately, and automatically clears stale Elementor CSS caches upon completion.
 
 = What happens if my internet connection drops halfway through an import? =
 
-Database imports are staged inside isolated shadow tables (`lwpmt_*`) and only swapped into your live tables at the final step using an atomic `RENAME TABLE` operation. In addition, the chunked AJAX runner automatically retries transient network/gateway hiccups with exponential backoff.
+Database imports are staged inside isolated shadow tables (`ldsmt_*`) and only swapped into your live tables at the final step using an atomic `RENAME TABLE` operation. In addition, the chunked AJAX runner automatically retries transient network/gateway hiccups with exponential backoff.
 
 = Can I stay logged in with my current administrator password after importing another site? =
 
-Yes. On the Pre-Import Review screen, keep **"Preserve my current Administrator account & password"** checked, and Liberty WP Migrator will preserve your admin credentials and refresh your authentication cookie seamlessly.
+Yes. On the Pre-Import Review screen, keep **"Preserve my current Administrator account & password"** checked, and LibertyDev Site Migrator will preserve your admin credentials and refresh your authentication cookie seamlessly.
 
-= Where are backups stored, and are they protected from public access? =
+= Where are backups stored, and are they protected on Nginx as well as Apache? =
 
-Backups are stored inside `wp-content/lwpm-backups/` with automatic `.htaccess` (Apache/LiteSpeed), `web.config` (IIS), and `index.php` protections, plus cryptographically randomized filenames. Downloads are served exclusively through an authenticated admin endpoint supporting HTTP `Range` requests.
+Yes. Backups are stored inside your WordPress uploads directory under a cryptographically randomized 128-bit vault folder (`uploads/libertydev-site-migrator/vault-{secret}/`) with `index.php` directory shields at every level, `.htaccess` (Apache/LiteSpeed), `web.config` (IIS), 96-bit randomized archive filenames, and `<?php exit; ?>` execution guards on all temporary job/SQL files so Nginx cannot enumerate or expose sensitive data.
 
 == Screenshots ==
 
@@ -68,20 +69,25 @@ Backups are stored inside `wp-content/lwpm-backups/` with automatic `.htaccess` 
 
 == Changelog ==
 
+= 1.3.0 =
+* Renamed plugin to LibertyDev Site Migrator (`libertydev-site-migrator`) with `LDSM_` / `ldsm_` prefixing per WordPress.org Plugin Directory guidelines.
+* Hardened backup vault for Nginx and all web servers using a 128-bit secret vault directory inside `wp_upload_dir()`, `index.php` shields, and `<?php exit; ?>` execution guards on all temporary state, manifest, index, and SQL dump files.
+* Added segment-by-segment anti-symlink (`is_link()`) and canonical `realpath()` boundary verification across all archive extraction and file restore paths.
+* Replaced hardcoded `WP_CONTENT_DIR` assumptions with dynamic WordPress directory resolution (`wp_upload_dir()`, `WP_PLUGIN_DIR`, `WPMU_PLUGIN_DIR`, `get_theme_root()`, `WP_LANG_DIR`).
+* Enforced immediate recursive input sanitization across all `$_POST` and `$_FILES` AJAX payloads and removed promotional signatures from scheduled notification emails.
+
 = 1.2.0 =
 * Added full WordPress.org Plugin Directory readiness (`readme.txt`, `.pot` translation catalog, and store artwork).
 * Upgraded database identifier queries to WordPress 6.2+ `%i` prepared placeholders and `wp_delete_file()` wrappers.
 * Streamlined binary archive download output via `php://output` stream handles.
 
 = 1.1.0 =
-* Rebranded to Liberty WP Migrator by LibertyDev with official vector mark and executive palette.
-* Added One-Click Manual Backups with custom notes/labels.
-* Added Automated Scheduled Backups (Every 6 Hours, Twice Daily, Daily, Weekly, Bi-Weekly, Monthly) with background WP-Cron slice chaining, retention rotation, and email notifications.
+* Added One-Click Manual Backups with custom notes/labels and Automated Scheduled Backups (Every 6 Hours, Twice Daily, Daily, Weekly, Bi-Weekly, Monthly) with background WP-Cron slice chaining and retention rotation.
 
 = 1.0.0 =
 * Initial release featuring chunked AJAX export/import, pure-PHP streaming ZIP/ZIP64 writer & reader, serialization-safe AST & JSON domain replacer, and bilingual English / Arabic (RTL) interface.
 
 == Upgrade Notice ==
 
-= 1.2.0 =
-WordPress 7.1 compatibility, WordPress.org Coding Standards hardening, and translation catalog support.
+= 1.3.0 =
+Security & compatibility upgrade: Nginx-hardened uploads vault, anti-symlink extraction guards, relocated WordPress directory support, and official LibertyDev Site Migrator slug.

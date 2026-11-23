@@ -1,34 +1,48 @@
 <?php
 /**
- * Import State-Machine Coordinator — Liberty WP Migrator.
+ * Import State-Machine Coordinator — LibertyDev Site Migrator.
+ *
+ * Restores archives into WordPress's canonically configured directories (supporting relocated
+ * uploads, plugins, mu-plugins, themes, and languages) with strict symlink boundary enforcement
+ * and PHP-exit-guarded temporary extraction files.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-class LWPM_Importer {
+class LDSM_Importer {
 
 	/**
-	 * Capture current destination WordPress environment & active administrator details.
+	 * Capture current destination WordPress environment, canonical directory roots, & active administrator details.
+	 *
+	 * @return array<string,mixed>
 	 */
 	private static function capture_destination_context() {
 		global $wpdb;
 
-		$upload_dir = wp_upload_dir();
-		$dest_info  = array(
-			'home_url'       => untrailingslashit( home_url() ),
-			'site_url'       => untrailingslashit( site_url() ),
-			'abspath'        => LWPM_Storage::normalize_path( ABSPATH ),
-			'wp_content_dir' => LWPM_Storage::normalize_path( WP_CONTENT_DIR ),
-			'uploads_url'    => isset( $upload_dir['baseurl'] ) ? untrailingslashit( (string) $upload_dir['baseurl'] ) : '',
-			'uploads_path'   => isset( $upload_dir['basedir'] ) ? LWPM_Storage::normalize_path( (string) $upload_dir['basedir'] ) : '',
-			'table_prefix'   => (string) $wpdb->prefix,
+		$upload_dir = wp_upload_dir( null, false );
+		$roots      = LDSM_Storage::get_content_roots();
+
+		$dest_info = array(
+			'home_url'        => untrailingslashit( home_url() ),
+			'site_url'        => untrailingslashit( site_url() ),
+			'content_url'     => untrailingslashit( content_url() ),
+			'plugins_url'     => untrailingslashit( plugins_url() ),
+			'uploads_url'     => isset( $upload_dir['baseurl'] ) ? untrailingslashit( (string) $upload_dir['baseurl'] ) : '',
+			'abspath'         => LDSM_Storage::normalize_path( ABSPATH ),
+			'uploads_path'    => isset( $roots['uploads'] ) ? $roots['uploads'] : '',
+			'plugins_path'    => isset( $roots['plugins'] ) ? $roots['plugins'] : '',
+			'mu_plugins_path' => isset( $roots['mu-plugins'] ) ? $roots['mu-plugins'] : '',
+			'themes_path'     => isset( $roots['themes'] ) ? $roots['themes'] : '',
+			'languages_path'  => isset( $roots['languages'] ) ? $roots['languages'] : '',
+			'table_prefix'    => (string) $wpdb->prefix,
 		);
 
 		$preserved_admin = array();
 		$curr_user       = wp_get_current_user();
 		if ( $curr_user && $curr_user->exists() ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$raw_row = $wpdb->get_row(
 				$wpdb->prepare( "SELECT * FROM {$wpdb->users} WHERE `ID` = %d LIMIT 1", (int) $curr_user->ID ),
 				ARRAY_A
@@ -44,24 +58,34 @@ class LWPM_Importer {
 			}
 		}
 
+		// Ensure vault key exists before snapshot so we preserve the destination vault across DB swap.
+		LDSM_Storage::ensure_storage_ready();
+		$dest_vault_key = (string) get_option( 'ldsm_vault_key', '' );
+
 		return array(
 			'dest_info'       => $dest_info,
 			'preserved_admin' => $preserved_admin,
+			'dest_vault_key'  => $dest_vault_key,
 		);
 	}
 
 	/**
 	 * Initialize a new chunked upload Import job.
+	 *
+	 * @param string $filename   Original archive filename.
+	 * @param int    $total_size Total archive byte size.
+	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function init_upload_job( $filename, $total_size ) {
-		if ( '.zip' !== strtolower( substr( (string) $filename, -4 ) ) ) {
-			return new WP_Error( 'invalid_extension', 'Only .zip archives created by Liberty WP Migrator are supported.' );
+		$clean_filename = sanitize_file_name( (string) $filename );
+		if ( '.zip' !== strtolower( substr( $clean_filename, -4 ) ) ) {
+			return new WP_Error( 'invalid_extension', 'Only .zip archives created by LibertyDev Site Migrator are supported.' );
 		}
-		if ( $total_size < 22 ) {
+		if ( (int) $total_size < 22 ) {
 			return new WP_Error( 'file_too_small', 'Selected archive file is empty or invalid.' );
 		}
 
-		$job = LWPM_Storage::create_job( 'imp' );
+		$job = LDSM_Storage::create_job( 'imp' );
 		if ( is_wp_error( $job ) ) {
 			return $job;
 		}
@@ -80,10 +104,11 @@ class LWPM_Importer {
 			'uploaded_bytes'     => 0,
 			'dest_info'          => $ctx['dest_info'],
 			'preserved_admin'    => $ctx['preserved_admin'],
+			'dest_vault_key'     => $ctx['dest_vault_key'],
 		);
 
-		if ( ! LWPM_Storage::save_job_state( $job['job_id'], $state ) ) {
-			LWPM_Storage::delete_job( $job['job_id'] );
+		if ( ! LDSM_Storage::save_job_state( $job['job_id'], $state ) ) {
+			LDSM_Storage::delete_job( $job['job_id'] );
 			return new WP_Error( 'state_save_failed', 'Could not save initial import state.' );
 		}
 
@@ -96,9 +121,19 @@ class LWPM_Importer {
 
 	/**
 	 * Append an uploaded binary chunk at $offset (idempotent on network retries).
+	 *
+	 * @param string $job_id       Import job ID.
+	 * @param int    $offset       Expected byte offset.
+	 * @param string $tmp_filepath Temporary uploaded chunk path from $_FILES.
+	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function receive_upload_chunk( $job_id, $offset, $tmp_filepath ) {
-		$state = LWPM_Storage::load_job_state( $job_id );
+		$job_dir = LDSM_Storage::get_job_dir( $job_id );
+		if ( is_wp_error( $job_dir ) ) {
+			return $job_dir;
+		}
+
+		$state = LDSM_Storage::load_job_state( $job_id );
 		if ( is_wp_error( $state ) ) {
 			return $state;
 		}
@@ -106,8 +141,8 @@ class LWPM_Importer {
 			return new WP_Error( 'invalid_upload_phase', 'Job is no longer accepting upload chunks.' );
 		}
 
-		if ( ! is_file( $tmp_filepath ) || ! is_readable( $tmp_filepath ) ) {
-			return new WP_Error( 'chunk_missing', 'Uploaded chunk payload was not received by PHP.' );
+		if ( ! is_uploaded_file( $tmp_filepath ) || ! is_readable( $tmp_filepath ) ) {
+			return new WP_Error( 'chunk_missing', 'Uploaded chunk payload failed upload verification.' );
 		}
 
 		$chunk_size   = (int) @filesize( $tmp_filepath );
@@ -129,25 +164,36 @@ class LWPM_Importer {
 			);
 		}
 
-		$zip_path = (string) $state['zip_path'];
-		$out      = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
+		$zip_path   = (string) $state['zip_path'];
+		$safe_check = LDSM_Storage::prepare_safe_write_target( $zip_path, $job_dir );
+		if ( is_wp_error( $safe_check ) ) {
+			return $safe_check;
+		}
+
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming binary chunk assembly at exact offset.
+		$out = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $out ) {
 			return new WP_Error( 'pkg_open_failed', 'Cannot open target package.zip for writing.' );
 		}
 
 		if ( 0 !== @fseek( $out, $offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $out );
 			return new WP_Error( 'pkg_seek_failed', 'Failed seeking to chunk offset.' );
 		}
 
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$in = @fopen( $tmp_filepath, 'rb' );
 		if ( ! $in ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $out );
 			return new WP_Error( 'chunk_open_failed', 'Failed reading uploaded temporary chunk.' );
 		}
 
 		$copied = stream_copy_to_stream( $in, $out );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $in );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $out );
 
 		if ( false === $copied || $copied !== $chunk_size ) {
@@ -160,7 +206,7 @@ class LWPM_Importer {
 			$state['phase'] = 'ready_to_inspect';
 		}
 
-		LWPM_Storage::save_job_state( $job_id, $state );
+		LDSM_Storage::save_job_state( $job_id, $state );
 
 		return array(
 			'job_id'          => $job_id,
@@ -170,19 +216,22 @@ class LWPM_Importer {
 	}
 
 	/**
-	 * Initialize an Import job directly from an existing .zip archive stored in wp-content/lwpm-backups.
+	 * Initialize an Import job directly from an existing .zip archive stored in the secret vault.
+	 *
+	 * @param string $backup_filename Stored archive filename.
+	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function init_from_stored_backup( $backup_filename ) {
-		if ( ! LWPM_Storage::is_valid_backup_filename( $backup_filename ) ) {
+		if ( ! LDSM_Storage::is_valid_backup_filename( $backup_filename ) ) {
 			return new WP_Error( 'invalid_backup', 'Invalid backup filename.' );
 		}
 
-		$zip_path = LWPM_Storage::get_backups_dir() . '/' . $backup_filename;
-		if ( ! is_file( $zip_path ) || ! is_readable( $zip_path ) ) {
+		$zip_path = LDSM_Storage::get_backups_dir() . '/' . $backup_filename;
+		if ( ! is_file( $zip_path ) || is_link( $zip_path ) || ! is_readable( $zip_path ) ) {
 			return new WP_Error( 'backup_not_found', 'Stored backup file does not exist.' );
 		}
 
-		$job = LWPM_Storage::create_job( 'imp' );
+		$job = LDSM_Storage::create_job( 'imp' );
 		if ( is_wp_error( $job ) ) {
 			return $job;
 		}
@@ -198,31 +247,35 @@ class LWPM_Importer {
 			'delete_zip_after' => false,
 			'dest_info'        => $ctx['dest_info'],
 			'preserved_admin'  => $ctx['preserved_admin'],
+			'dest_vault_key'   => $ctx['dest_vault_key'],
 		);
 
-		LWPM_Storage::save_job_state( $job['job_id'], $state );
+		LDSM_Storage::save_job_state( $job['job_id'], $state );
 
 		return self::inspect_package( $job['job_id'] );
 	}
 
 	/**
 	 * Inspect the uploaded/selected .zip archive and return pre-flight summary.
+	 *
+	 * @param string $job_id Import job ID.
+	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function inspect_package( $job_id ) {
-		$job_dir = LWPM_Storage::get_job_dir( $job_id );
+		$job_dir = LDSM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
 			return $job_dir;
 		}
 
-		$state = LWPM_Storage::load_job_state( $job_id );
+		$state = LDSM_Storage::load_job_state( $job_id );
 		if ( is_wp_error( $state ) ) {
 			return $state;
 		}
 
-		$index_jsonl = $job_dir . '/extract_index.jsonl';
-		$summary     = LWPM_Stream_Zip_Reader::index_archive( (string) $state['zip_path'], $index_jsonl );
+		$index_php = $job_dir . '/extract_index.php';
+		$summary   = LDSM_Stream_Zip_Reader::index_archive( (string) $state['zip_path'], $index_php );
 		if ( is_wp_error( $summary ) ) {
-			LWPM_Storage::delete_job( $job_id );
+			LDSM_Storage::delete_job( $job_id );
 			return $summary;
 		}
 
@@ -234,7 +287,7 @@ class LWPM_Importer {
 		$state['files_count']       = (int) $summary['files_count'];
 		$state['uncompressed_size'] = (int) $summary['uncompressed_size'];
 
-		LWPM_Storage::save_job_state( $job_id, $state );
+		LDSM_Storage::save_job_state( $job_id, $state );
 
 		return array(
 			'job_id'          => $job_id,
@@ -251,9 +304,13 @@ class LWPM_Importer {
 
 	/**
 	 * Confirm and kick off extraction & shadow-DB import.
+	 *
+	 * @param string $job_id         Import job ID.
+	 * @param array  $import_options Sanitized import options.
+	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function start_confirmed_import( $job_id, array $import_options ) {
-		$state = LWPM_Storage::load_job_state( $job_id );
+		$state = LDSM_Storage::load_job_state( $job_id );
 		if ( is_wp_error( $state ) ) {
 			return $state;
 		}
@@ -261,8 +318,7 @@ class LWPM_Importer {
 			return new WP_Error( 'invalid_confirm_state', 'Archive must be inspected before starting import.' );
 		}
 
-		// Preserve existing destination schedule configuration across site imports if present.
-		$existing_sched = get_option( 'lwpm_schedule_settings', null );
+		$existing_sched = get_option( 'ldsm_schedule_settings', null );
 
 		$state['import_options'] = array(
 			'keep_current_admin' => ! empty( $import_options['keep_current_admin'] ),
@@ -277,8 +333,8 @@ class LWPM_Importer {
 		$state['current_extract_item'] = null;
 		$state['partial_extract']      = null;
 
-		LWPM_Storage::save_job_state( $job_id, $state );
-		update_option( 'lwpm_maintenance_active', time(), false );
+		LDSM_Storage::save_job_state( $job_id, $state );
+		update_option( 'ldsm_maintenance_active', time(), false );
 
 		return array(
 			'done'     => false,
@@ -292,23 +348,26 @@ class LWPM_Importer {
 
 	/**
 	 * Execute one time-boxed Import tick.
+	 *
+	 * @param string $job_id Import job ID.
+	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function run_tick( $job_id ) {
-		$job_dir = LWPM_Storage::get_job_dir( $job_id );
+		$job_dir = LDSM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
-			delete_option( 'lwpm_maintenance_active' );
+			delete_option( 'ldsm_maintenance_active' );
 			return $job_dir;
 		}
 
-		$state = LWPM_Storage::load_job_state( $job_id );
+		$state = LDSM_Storage::load_job_state( $job_id );
 		if ( is_wp_error( $state ) ) {
-			delete_option( 'lwpm_maintenance_active' );
+			delete_option( 'ldsm_maintenance_active' );
 			return $state;
 		}
 
-		update_option( 'lwpm_maintenance_active', time(), false );
+		update_option( 'ldsm_maintenance_active', time(), false );
 
-		$deadline = microtime( true ) + LWPM_TIME_BUDGET;
+		$deadline = microtime( true ) + LDSM_TIME_BUDGET;
 		$phase    = (string) $state['phase'];
 
 		if ( 'extract_files' === $phase ) {
@@ -328,7 +387,7 @@ class LWPM_Importer {
 				$pct = 10 + (int) floor( ( $done_f / $total_f ) * 41 );
 			}
 
-			LWPM_Storage::save_job_state( $job_id, $state );
+			LDSM_Storage::save_job_state( $job_id, $state );
 
 			return array(
 				'done'     => false,
@@ -341,15 +400,15 @@ class LWPM_Importer {
 		}
 
 		if ( 'import_db' === $phase ) {
-			$sql_file = $job_dir . '/database.sql';
-			$db_res   = LWPM_DB_Importer::import_sql_step( $state, $sql_file, $deadline );
+			$sql_php = $job_dir . '/database.sql.php';
+			$db_res  = LDSM_DB_Importer::import_sql_step( $state, $sql_php, $deadline );
 			if ( is_wp_error( $db_res ) ) {
 				self::cleanup_failed_import( $job_id, $state );
 				return $db_res;
 			}
 
 			if ( true === $db_res ) {
-				wp_delete_file( $sql_file );
+				wp_delete_file( $sql_php );
 				$state['phase'] = 'search_replace';
 				$pct            = 76;
 			} else {
@@ -358,7 +417,7 @@ class LWPM_Importer {
 				$pct    = 52 + (int) floor( ( $done_b / $tot_b ) * 23 );
 			}
 
-			LWPM_Storage::save_job_state( $job_id, $state );
+			LDSM_Storage::save_job_state( $job_id, $state );
 
 			return array(
 				'done'     => false,
@@ -371,12 +430,12 @@ class LWPM_Importer {
 		}
 
 		if ( 'search_replace' === $phase ) {
-			$replacer = LWPM_Replacer::from_migration_context(
+			$replacer = LDSM_Replacer::from_migration_context(
 				(array) $state['manifest'],
 				(array) $state['dest_info']
 			);
 
-			$sr_res = LWPM_DB_Importer::search_replace_step( $state, $replacer, $deadline );
+			$sr_res = LDSM_DB_Importer::search_replace_step( $state, $replacer, $deadline );
 			if ( is_wp_error( $sr_res ) ) {
 				self::cleanup_failed_import( $job_id, $state );
 				return $sr_res;
@@ -392,7 +451,7 @@ class LWPM_Importer {
 				$pct = 76 + (int) floor( ( $done_t / $tot_t ) * 17 );
 			}
 
-			LWPM_Storage::save_job_state( $job_id, $state );
+			LDSM_Storage::save_job_state( $job_id, $state );
 
 			return array(
 				'done'     => false,
@@ -405,24 +464,31 @@ class LWPM_Importer {
 		}
 
 		if ( 'atomic_swap' === $phase ) {
-			$swap_res = LWPM_DB_Importer::finalize_and_atomic_swap( $state );
+			$swap_res = LDSM_DB_Importer::finalize_and_atomic_swap( $state );
 			if ( is_wp_error( $swap_res ) ) {
 				self::cleanup_failed_import( $job_id, $state );
 				return $swap_res;
 			}
 
+			$roots     = LDSM_Storage::get_content_roots();
 			$staged_mu = $job_dir . '/staged_mu_plugins';
-			if ( is_dir( $staged_mu ) ) {
-				$target_mu = LWPM_Storage::normalize_path( WP_CONTENT_DIR ) . '/mu-plugins';
-				self::copy_dir_recursive( $staged_mu, $target_mu );
+			if ( is_dir( $staged_mu ) && ! empty( $roots['mu-plugins'] ) ) {
+				$target_mu = $roots['mu-plugins'];
+				self::copy_dir_safe_recursive( $staged_mu, $target_mu, $target_mu );
 			}
 
-			$elementor_css_dir = LWPM_Storage::normalize_path( WP_CONTENT_DIR ) . '/uploads/elementor/css';
-			if ( is_dir( $elementor_css_dir ) ) {
-				$css_files = glob( $elementor_css_dir . '/*.css' );
-				if ( is_array( $css_files ) ) {
-					foreach ( $css_files as $cf ) {
-						wp_delete_file( $cf );
+			// Purge Elementor generated CSS cache dynamically inside the configured uploads folder.
+			$uploads_info = wp_upload_dir( null, false );
+			if ( ! empty( $uploads_info['basedir'] ) ) {
+				$elementor_css_dir = LDSM_Storage::normalize_path( $uploads_info['basedir'] ) . '/elementor/css';
+				if ( is_dir( $elementor_css_dir ) && ! is_link( $elementor_css_dir ) ) {
+					$css_files = glob( $elementor_css_dir . '/*.css' );
+					if ( is_array( $css_files ) ) {
+						foreach ( $css_files as $cf ) {
+							if ( is_file( $cf ) && ! is_link( $cf ) ) {
+								wp_delete_file( $cf );
+							}
+						}
 					}
 				}
 			}
@@ -431,11 +497,10 @@ class LWPM_Importer {
 				@wp_cache_flush();
 			}
 
-			// Re-sync backup cron schedule after database swap.
-			LWPM_Scheduler::sync_cron_with_settings();
+			LDSM_Scheduler::sync_cron_with_settings();
 
-			update_option( 'lwpm_needs_rewrite_flush', 1, true );
-			delete_option( 'lwpm_maintenance_active' );
+			update_option( 'ldsm_needs_rewrite_flush', 1, true );
+			delete_option( 'ldsm_maintenance_active' );
 
 			if ( is_int( $swap_res ) && $swap_res > 0 && ! headers_sent() ) {
 				wp_clear_auth_cookie();
@@ -446,7 +511,7 @@ class LWPM_Importer {
 			$dest_home = (string) $state['dest_info']['home_url'];
 			$dest_site = (string) $state['dest_info']['site_url'];
 
-			LWPM_Storage::delete_job( $job_id );
+			LDSM_Storage::delete_job( $job_id );
 
 			return array(
 				'done'      => true,
@@ -454,28 +519,35 @@ class LWPM_Importer {
 				'phase'     => 'complete',
 				'percent'   => 100,
 				'home_url'  => $dest_home,
-				'admin_url' => trailingslashit( $dest_site ) . 'wp-admin/admin.php?page=liberty-wp-migrator',
+				'admin_url' => trailingslashit( $dest_site ) . 'wp-admin/admin.php?page=libertydev-site-migrator',
 			);
 		}
 
-		delete_option( 'lwpm_maintenance_active' );
+		delete_option( 'ldsm_maintenance_active' );
 		return new WP_Error( 'unknown_import_phase', 'Unknown import phase: ' . $phase );
 	}
 
 	/**
-	 * Extract database.sql and wp-content files in time-boxed batches.
+	 * Extract database.sql (as guarded database.sql.php) and content files in time-boxed batches.
+	 *
+	 * @param string $job_dir  Job directory.
+	 * @param array  $state    Job state (modified by reference).
+	 * @param float  $deadline Unix microtime deadline.
+	 * @return bool|WP_Error
 	 */
 	private static function extract_step( $job_dir, array &$state, $deadline ) {
 		$zip_path = (string) $state['zip_path'];
 
 		if ( empty( $state['db_extracted'] ) ) {
-			$sql_dest = $job_dir . '/database.sql';
-			$db_res   = LWPM_Stream_Zip_Reader::extract_entry_to_file_chunked(
+			$sql_dest = $job_dir . '/database.sql.php';
+			$db_res   = LDSM_Stream_Zip_Reader::extract_entry_to_file_chunked(
 				$zip_path,
 				(array) $state['db_entry'],
 				$sql_dest,
+				$job_dir,
 				$state['partial_extract'],
-				$deadline
+				$deadline,
+				true
 			);
 			if ( is_wp_error( $db_res ) ) {
 				return $db_res;
@@ -490,18 +562,20 @@ class LWPM_Importer {
 			}
 		}
 
-		$wp_content_norm = LWPM_Storage::normalize_path( WP_CONTENT_DIR );
+		$roots = LDSM_Storage::get_content_roots();
 
 		if ( ! empty( $state['current_extract_item'] ) && ! empty( $state['partial_extract'] ) ) {
-			$item     = $state['current_extract_item'];
-			$dest_abs = self::resolve_safe_extract_destination( $item['rel_path'], $wp_content_norm, $job_dir );
-			if ( null !== $dest_abs ) {
-				$p_res = LWPM_Stream_Zip_Reader::extract_entry_to_file_chunked(
+			$item   = $state['current_extract_item'];
+			$target = self::resolve_safe_extract_target( $item, $roots, $job_dir );
+			if ( null !== $target ) {
+				$p_res = LDSM_Stream_Zip_Reader::extract_entry_to_file_chunked(
 					$zip_path,
 					$item,
-					$dest_abs,
+					$target['dest_path'],
+					$target['allowed_root'],
 					$state['partial_extract'],
-					$deadline
+					$deadline,
+					false
 				);
 				if ( is_wp_error( $p_res ) ) {
 					return $p_res;
@@ -518,51 +592,56 @@ class LWPM_Importer {
 			}
 		}
 
-		$index_jsonl = $job_dir . '/extract_index.jsonl';
-		if ( ! file_exists( $index_jsonl ) ) {
+		$index_php = $job_dir . '/extract_index.php';
+		if ( ! file_exists( $index_php ) ) {
 			return true;
 		}
 
-		$fp = @fopen( $index_jsonl, 'rb' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming byte-offset extraction index cursor across ticks.
+		$fp = @fopen( $index_php, 'rb' );
 		if ( ! $fp ) {
-			return new WP_Error( 'extract_index_open_failed', 'Cannot open extract_index.jsonl.' );
+			return new WP_Error( 'extract_index_open_failed', 'Cannot open guarded extraction index.' );
 		}
 
 		if ( 0 !== @fseek( $fp, (int) $state['extract_index_offset'], SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
-			return new WP_Error( 'extract_index_seek_failed', 'Failed seeking in extract_index.jsonl.' );
+			return new WP_Error( 'extract_index_seek_failed', 'Failed seeking in guarded extraction index.' );
 		}
 
 		while ( ( $line = fgets( $fp ) ) !== false ) {
 			$next_offset = (int) ftell( $fp );
 			$trimmed     = trim( $line );
-			if ( '' === $trimmed ) {
+			if ( '' === $trimmed || 0 === strpos( $trimmed, '<?php' ) ) {
 				$state['extract_index_offset'] = $next_offset;
 				continue;
 			}
 
 			$item = json_decode( $trimmed, true );
-			if ( ! is_array( $item ) || empty( $item['rel_path'] ) ) {
+			if ( ! is_array( $item ) || empty( $item['root_key'] ) || empty( $item['sub_path'] ) ) {
 				$state['extract_index_offset'] = $next_offset;
 				continue;
 			}
 
-			$dest_abs = self::resolve_safe_extract_destination( (string) $item['rel_path'], $wp_content_norm, $job_dir );
-			if ( null === $dest_abs ) {
+			$target = self::resolve_safe_extract_target( $item, $roots, $job_dir );
+			if ( null === $target ) {
 				$state['extract_index_offset'] = $next_offset;
 				$state['files_extracted']     += 1;
 				continue;
 			}
 
-			$res = LWPM_Stream_Zip_Reader::extract_entry_to_file_chunked(
+			$res = LDSM_Stream_Zip_Reader::extract_entry_to_file_chunked(
 				$zip_path,
 				$item,
-				$dest_abs,
+				$target['dest_path'],
+				$target['allowed_root'],
 				$state['partial_extract'],
-				$deadline
+				$deadline,
+				false
 			);
 
 			if ( is_wp_error( $res ) ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return $res;
 			}
@@ -571,6 +650,7 @@ class LWPM_Importer {
 
 			if ( false === $res ) {
 				$state['current_extract_item'] = $item;
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return false;
 			}
@@ -578,6 +658,7 @@ class LWPM_Importer {
 			$state['files_extracted'] += 1;
 
 			if ( microtime( true ) >= $deadline ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return false;
 			}
@@ -585,51 +666,80 @@ class LWPM_Importer {
 
 		$is_eof                        = feof( $fp );
 		$state['extract_index_offset'] = (int) ftell( $fp );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
 		return $is_eof && empty( $state['partial_extract'] );
 	}
 
 	/**
-	 * Map relative archive path (wp-content/...) to safe destination path on disk.
+	 * Map logical archive entry ({root_key}/{sub_path}) to destination path and canonical allowed root.
+	 *
+	 * @param array  $item    Indexed archive entry.
+	 * @param array  $roots   Canonical destination content roots.
+	 * @param string $job_dir Job workspace directory.
+	 * @return array{dest_path:string,allowed_root:string}|null
 	 */
-	private static function resolve_safe_extract_destination( $rel_path, $wp_content_norm, $job_dir ) {
-		if ( 0 !== strpos( $rel_path, 'wp-content/' ) ) {
+	private static function resolve_safe_extract_target( array $item, array $roots, $job_dir ) {
+		$root_key = isset( $item['root_key'] ) ? (string) $item['root_key'] : '';
+		$raw_sub  = isset( $item['sub_path'] ) ? (string) $item['sub_path'] : '';
+
+		$sub_path = LDSM_Stream_Zip_Reader::sanitize_safe_rel_path( $raw_sub );
+		if ( false === $sub_path || '' === $sub_path ) {
 			return null;
 		}
 
-		$inside = substr( $rel_path, 11 );
-		if ( '' === $inside ) {
+		$lower_sub  = strtolower( $sub_path );
+		$own_folder = strtolower( basename( rtrim( LDSM_PLUGIN_DIR, '/\\' ) ) );
+
+		if ( 'plugins' === $root_key ) {
+			if (
+				0 === strpos( $lower_sub, $own_folder . '/' ) ||
+				0 === strpos( $lower_sub, 'libertydev-site-migrator/' ) ||
+				0 === strpos( $lower_sub, 'liberty-wp-migrator/' ) ||
+				0 === strpos( $lower_sub, 'omni-wp-migrator/' )
+			) {
+				return null;
+			}
+		}
+
+		if ( 'uploads' === $root_key ) {
+			if (
+				0 === strpos( $lower_sub, 'libertydev-site-migrator/' ) ||
+				0 === strpos( $lower_sub, 'lwpm-backups/' ) ||
+				0 === strpos( $lower_sub, 'owpm-backups/' )
+			) {
+				return null;
+			}
+		}
+
+		if ( 'mu-plugins' === $root_key ) {
+			$staged_root = $job_dir . '/staged_mu_plugins';
+			return array(
+				'dest_path'    => $staged_root . '/' . $sub_path,
+				'allowed_root' => $staged_root,
+			);
+		}
+
+		if ( empty( $roots[ $root_key ] ) ) {
 			return null;
 		}
 
-		$lower_inside = strtolower( $inside );
-
-		if (
-			0 === strpos( $lower_inside, 'lwpm-backups/' ) ||
-			0 === strpos( $lower_inside, 'owpm-backups/' ) ||
-			0 === strpos( $lower_inside, 'plugins/liberty-wp-migrator/' ) ||
-			0 === strpos( $lower_inside, 'plugins/omni-wp-migrator/' ) ||
-			'object-cache.php' === $lower_inside ||
-			'advanced-cache.php' === $lower_inside ||
-			'wp-cache-config.php' === $lower_inside
-		) {
-			return null;
-		}
-
-		if ( 0 === strpos( $inside, 'mu-plugins/' ) ) {
-			$mu_sub = substr( $inside, 11 );
-			return '' !== $mu_sub ? ( $job_dir . '/staged_mu_plugins/' . $mu_sub ) : null;
-		}
-
-		return $wp_content_norm . '/' . $inside;
+		return array(
+			'dest_path'    => $roots[ $root_key ] . '/' . $sub_path,
+			'allowed_root' => $roots[ $root_key ],
+		);
 	}
 
 	/**
-	 * Recursively copy staged directory contents into target directory.
+	 * Recursively copy staged mu-plugins into WPMU_PLUGIN_DIR while blocking symlinks at every segment.
+	 *
+	 * @param string $src          Staged source directory.
+	 * @param string $dst          Destination directory.
+	 * @param string $allowed_root Canonical allowed destination root.
 	 */
-	private static function copy_dir_recursive( $src, $dst ) {
-		if ( ! is_dir( $src ) ) {
+	private static function copy_dir_safe_recursive( $src, $dst, $allowed_root ) {
+		if ( ! is_dir( $src ) || is_link( $src ) || is_link( $dst ) ) {
 			return;
 		}
 		if ( ! is_dir( $dst ) ) {
@@ -645,23 +755,33 @@ class LWPM_Importer {
 			}
 			$s = $src . '/' . $item;
 			$d = $dst . '/' . $item;
-			if ( is_dir( $s ) && ! is_link( $s ) ) {
-				self::copy_dir_recursive( $s, $d );
+			if ( is_link( $s ) || is_link( $d ) ) {
+				continue;
+			}
+			if ( is_dir( $s ) ) {
+				self::copy_dir_safe_recursive( $s, $d, $allowed_root );
 			} elseif ( is_file( $s ) ) {
-				@copy( $s, $d );
+				$safe_check = LDSM_Storage::prepare_safe_write_target( $d, $allowed_root );
+				if ( ! is_wp_error( $safe_check ) && ! is_link( $d ) ) {
+					@copy( $s, $d );
+				}
 			}
 		}
 	}
 
 	/**
 	 * Clean up shadow tables, maintenance flag, and temporary job workspace on failure/cancellation.
+	 *
+	 * @param string $job_id Import job ID.
+	 * @param array  $state  Import job state.
 	 */
 	public static function cleanup_failed_import( $job_id, array $state ) {
 		global $wpdb;
 
-		delete_option( 'lwpm_maintenance_active' );
+		delete_option( 'ldsm_maintenance_active' );
 
 		if ( ! empty( $state['shadow_map'] ) && is_array( $state['shadow_map'] ) ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 0' );
 			foreach ( $state['shadow_map'] as $info ) {
 				if ( ! empty( $info['shadow'] ) ) {
@@ -669,9 +789,10 @@ class LWPM_Importer {
 					$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $info['shadow'] ) );
 				}
 			}
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 1' );
 		}
 
-		LWPM_Storage::delete_job( $job_id );
+		LDSM_Storage::delete_job( $job_id );
 	}
 }
