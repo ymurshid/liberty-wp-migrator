@@ -68,8 +68,10 @@ class LDSM_Stream_Zip_Reader {
 		}
 
 		clearstatcache( true, $zip_path );
-		$file_size = (int) @filesize( $zip_path );
-		if ( $file_size < 22 ) {
+		$file_size   = (int) @filesize( $zip_path );
+		$base_offset = LDSM_Storage::detect_php_guard_length( $zip_path );
+		$zip_size    = $file_size - $base_offset;
+		if ( $zip_size < 22 ) {
 			return new WP_Error( 'zip_too_small', 'Selected file is too small to be a valid ZIP archive.' );
 		}
 
@@ -79,7 +81,7 @@ class LDSM_Stream_Zip_Reader {
 			return new WP_Error( 'zip_open_failed', 'Could not open ZIP archive for reading.' );
 		}
 
-		$eocd_info = self::locate_central_directory( $fp, $file_size );
+		$eocd_info = self::locate_central_directory( $fp, $zip_size, $base_offset );
 		if ( is_wp_error( $eocd_info ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
@@ -89,7 +91,7 @@ class LDSM_Stream_Zip_Reader {
 		$cd_offset     = (int) $eocd_info['cd_offset'];
 		$total_entries = (int) $eocd_info['total_entries'];
 
-		if ( 0 !== @fseek( $fp, $cd_offset, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $fp, $base_offset + $cd_offset, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'cd_seek_failed', 'Could not seek to ZIP Central Directory.' );
@@ -288,13 +290,15 @@ class LDSM_Stream_Zip_Reader {
 	 * Extract a small ZIP entry directly into a PHP string.
 	 */
 	public static function extract_entry_to_string( $zip_path, array $entry_meta ) {
+		$base_offset = LDSM_Storage::detect_php_guard_length( $zip_path );
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, 'rb' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open ZIP archive.' );
 		}
 
-		$data_offset = self::resolve_entry_data_offset( $fp, (int) $entry_meta['offset'] );
+		$data_offset = self::resolve_entry_data_offset( $fp, (int) $entry_meta['offset'], $base_offset );
 		if ( is_wp_error( $data_offset ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
@@ -310,7 +314,7 @@ class LDSM_Stream_Zip_Reader {
 			return '';
 		}
 
-		if ( 0 !== @fseek( $fp, $data_offset, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $fp, $base_offset + $data_offset, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'entry_seek_failed', 'Cannot seek to entry payload.' );
@@ -371,6 +375,8 @@ class LDSM_Stream_Zip_Reader {
 			return true;
 		}
 
+		$base_offset = LDSM_Storage::detect_php_guard_length( $zip_path );
+
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$fp = @fopen( $zip_path, 'rb' );
 		if ( ! $fp ) {
@@ -381,7 +387,7 @@ class LDSM_Stream_Zip_Reader {
 			$data_offset = (int) $partial_extract['data_offset'];
 			$bytes_done  = (int) $partial_extract['bytes_done'];
 		} else {
-			$data_offset = self::resolve_entry_data_offset( $fp, (int) $entry_meta['offset'] );
+			$data_offset = self::resolve_entry_data_offset( $fp, (int) $entry_meta['offset'], $base_offset );
 			if ( is_wp_error( $data_offset ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
@@ -391,7 +397,7 @@ class LDSM_Stream_Zip_Reader {
 		}
 
 		if ( 0 === $method ) {
-			if ( 0 !== @fseek( $fp, $data_offset + $bytes_done, SEEK_SET ) ) {
+			if ( 0 !== @fseek( $fp, $base_offset + $data_offset + $bytes_done, SEEK_SET ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_seek_failed', 'Cannot seek to stored file payload.' );
@@ -462,7 +468,7 @@ class LDSM_Stream_Zip_Reader {
 		}
 
 		if ( 8 === $method ) {
-			if ( 0 !== @fseek( $fp, $data_offset, SEEK_SET ) ) {
+			if ( 0 !== @fseek( $fp, $base_offset + $data_offset, SEEK_SET ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
 				return new WP_Error( 'zip_seek_failed', 'Cannot seek to deflated file payload.' );
@@ -571,13 +577,18 @@ class LDSM_Stream_Zip_Reader {
 	}
 
 	/**
-	 * Locate End of Central Directory (and ZIP64 EOCD if present).
+	 * Locate End of Central Directory (and ZIP64 EOCD if present) accounting for optional leading PHP guard bytes.
+	 *
+	 * @param resource $fp          Open ZIP file handle.
+	 * @param int      $zip_size    Logical ZIP byte length (excluding $base_offset).
+	 * @param int      $base_offset Leading PHP guard byte offset (0 for raw .zip, 31 for guarded .zip.php).
+	 * @return array<string,int>|WP_Error
 	 */
-	private static function locate_central_directory( $fp, $file_size ) {
-		$read_len   = min( $file_size, 65557 );
-		$tail_start = $file_size - $read_len;
+	private static function locate_central_directory( $fp, $zip_size, $base_offset = 0 ) {
+		$read_len   = min( $zip_size, 65557 );
+		$tail_start = $zip_size - $read_len;
 
-		if ( 0 !== @fseek( $fp, $tail_start, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $fp, $base_offset + $tail_start, SEEK_SET ) ) {
 			return new WP_Error( 'eocd_seek_failed', 'Failed seeking to end of ZIP archive.' );
 		}
 
@@ -616,11 +627,11 @@ class LDSM_Stream_Zip_Reader {
 			( 0xFFFF === $total_entries || 0xFFFFFFFF === $cd_size || 0xFFFFFFFF === $cd_offset ) &&
 			$eocd_abs_pos >= 20
 		) {
-			if ( 0 === @fseek( $fp, $eocd_abs_pos - 20, SEEK_SET ) ) {
+			if ( 0 === @fseek( $fp, $base_offset + $eocd_abs_pos - 20, SEEK_SET ) ) {
 				$loc_raw = self::fread_exact( $fp, 20 );
 				if ( false !== $loc_raw && "\x50\x4b\x06\x07" === substr( $loc_raw, 0, 4 ) ) {
 					$loc = unpack( 'Vsig/Vdisk/Pzip64off/Vtotaldisks', $loc_raw );
-					if ( is_array( $loc ) && 0 === @fseek( $fp, (int) $loc['zip64off'], SEEK_SET ) ) {
+					if ( is_array( $loc ) && 0 === @fseek( $fp, $base_offset + (int) $loc['zip64off'], SEEK_SET ) ) {
 						$z64_raw = self::fread_exact( $fp, 56 );
 						if ( false !== $z64_raw && "\x50\x4b\x06\x06" === substr( $z64_raw, 0, 4 ) ) {
 							$z64 = unpack(
@@ -687,10 +698,10 @@ class LDSM_Stream_Zip_Reader {
 	}
 
 	/**
-	 * Read Local File Header at $header_offset to calculate exact start of compressed payload.
+	 * Read Local File Header at logical $header_offset to calculate exact logical start of compressed payload.
 	 */
-	private static function resolve_entry_data_offset( $fp, $header_offset ) {
-		if ( 0 !== @fseek( $fp, $header_offset, SEEK_SET ) ) {
+	private static function resolve_entry_data_offset( $fp, $header_offset, $base_offset = 0 ) {
+		if ( 0 !== @fseek( $fp, $base_offset + $header_offset, SEEK_SET ) ) {
 			return new WP_Error( 'lfh_seek_failed', 'Cannot seek to Local File Header.' );
 		}
 		$lfh = self::fread_exact( $fp, 30 );

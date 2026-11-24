@@ -91,7 +91,7 @@ class LDSM_Importer {
 		}
 
 		$ctx      = self::capture_destination_context();
-		$zip_path = $job['job_dir'] . '/package.zip';
+		$zip_path = $job['job_dir'] . '/package.zip.php';
 
 		$state = array(
 			'job_id'             => $job['job_id'],
@@ -170,13 +170,17 @@ class LDSM_Importer {
 			return $safe_check;
 		}
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming binary chunk assembly at exact offset.
-		$out = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
-		if ( ! $out ) {
-			return new WP_Error( 'pkg_open_failed', 'Cannot open target package.zip for writing.' );
+		if ( ! LDSM_Storage::ensure_guarded_php_file( $zip_path ) ) {
+			return new WP_Error( 'pkg_guard_failed', 'Cannot initialize PHP-guarded upload package file.' );
 		}
 
-		if ( 0 !== @fseek( $out, $offset, SEEK_SET ) ) {
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming binary chunk assembly at exact offset after PHP guard header.
+		$out = @fopen( $zip_path, 'r+b' );
+		if ( ! $out ) {
+			return new WP_Error( 'pkg_open_failed', 'Cannot open target upload package for writing.' );
+		}
+
+		if ( 0 !== @fseek( $out, LDSM_Storage::PHP_EXIT_GUARD_LEN + $offset, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $out );
 			return new WP_Error( 'pkg_seek_failed', 'Failed seeking to chunk offset.' );
@@ -226,8 +230,8 @@ class LDSM_Importer {
 			return new WP_Error( 'invalid_backup', 'Invalid backup filename.' );
 		}
 
-		$zip_path = LDSM_Storage::get_backups_dir() . '/' . $backup_filename;
-		if ( ! is_file( $zip_path ) || is_link( $zip_path ) || ! is_readable( $zip_path ) ) {
+		$zip_path = LDSM_Storage::resolve_backup_disk_path( $backup_filename );
+		if ( '' === $zip_path || ! is_file( $zip_path ) || is_link( $zip_path ) || ! is_readable( $zip_path ) ) {
 			return new WP_Error( 'backup_not_found', 'Stored backup file does not exist.' );
 		}
 

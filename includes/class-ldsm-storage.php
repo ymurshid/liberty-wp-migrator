@@ -7,9 +7,9 @@
  *    inside a cryptographically unguessable 128-bit secret vault subdirectory (vault-{32_hex}) with
  *    index.php directory-listing shields in every level so Nginx (which ignores .htaccess) cannot
  *    enumerate or guess backup/job URLs.
- * 2. Every temporary state, manifest, index, and SQL dump file on disk is written as a .php file
- *    prefixed at byte 0 with "<?php exit; ?>\n" so direct HTTP requests on Nginx/Apache/IIS execute
- *    exit immediately and return zero bytes.
+ * 2. Every stored archive (.zip.php) and temporary state, manifest, index, metadata, and SQL dump file
+ *    on disk is written with a .php extension prefixed at byte 0 with "<?php exit; __halt_compiler();\n"
+ *    so direct HTTP requests on Nginx/Apache/IIS halt PHP compilation and exit with zero bytes output.
  * 3. Every extraction/copy destination is validated segment-by-segment with is_link() + realpath()
  *    confinement to block symlink-following directory traversal attacks.
  */
@@ -21,10 +21,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 class LDSM_Storage {
 
 	/**
-	 * 15-byte PHP execution guard prepended to all temporary job data/log/SQL files on disk.
+	 * 31-byte PHP execution & lexer-halt guard prepended to all vault archives and temporary files on disk.
+	 * Stopping the Zend lexer via __halt_compiler() guarantees PHP never parses trailing binary ZIP or SQL bytes.
 	 */
-	const PHP_EXIT_GUARD     = "<?php exit; ?>\n";
-	const PHP_EXIT_GUARD_LEN = 15;
+	const PHP_EXIT_GUARD     = "<?php exit; __halt_compiler();\n";
+	const PHP_EXIT_GUARD_LEN = 31;
 
 	/**
 	 * Normalize path slashes to forward slashes without trailing slash.
@@ -55,13 +56,16 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Move/rename a file atomically using WP_Filesystem with copy+delete fallback.
+	 * Move/rename a file atomically using WP_Filesystem with symlink refusal and copy+delete fallback.
 	 *
 	 * @param string $source      Source file path.
 	 * @param string $destination Destination file path.
 	 * @return bool
 	 */
 	public static function move_file( $source, $destination ) {
+		if ( is_link( $source ) || is_link( $destination ) ) {
+			return false;
+		}
 		$fs = self::get_wp_filesystem();
 		if ( $fs && $fs->move( $source, $destination, true ) ) {
 			return true;
@@ -79,7 +83,7 @@ class LDSM_Storage {
 	 * @param string $dir Directory path.
 	 */
 	public static function delete_dir_recursive( $dir ) {
-		if ( ! is_dir( $dir ) ) {
+		if ( '' === $dir || ! is_dir( $dir ) || is_link( $dir ) ) {
 			return;
 		}
 		$fs = self::get_wp_filesystem();
@@ -95,7 +99,7 @@ class LDSM_Storage {
 	 */
 	public static function get_content_roots() {
 		$uploads     = wp_upload_dir( null, false );
-		$uploads_dir = ! empty( $uploads['basedir'] ) ? self::normalize_path( $uploads['basedir'] ) : '';
+		$uploads_dir = ( empty( $uploads['error'] ) && ! empty( $uploads['basedir'] ) ) ? self::normalize_path( $uploads['basedir'] ) : '';
 		$plugins_dir = defined( 'WP_PLUGIN_DIR' ) ? self::normalize_path( WP_PLUGIN_DIR ) : self::normalize_path( dirname( LDSM_PLUGIN_DIR ) );
 		$mu_dir      = defined( 'WPMU_PLUGIN_DIR' ) ? self::normalize_path( WPMU_PLUGIN_DIR ) : '';
 		$themes_dir  = function_exists( 'get_theme_root' ) ? self::normalize_path( get_theme_root() ) : '';
@@ -119,13 +123,16 @@ class LDSM_Storage {
 
 	/**
 	 * Return outer plugin folder inside WordPress uploads: wp_upload_dir()['basedir'] . '/libertydev-site-migrator'.
+	 * Never falls back to hardcoded directory assumptions.
 	 *
-	 * @return string
+	 * @return string Normalized directory path or empty string if wp_upload_dir() is unavailable.
 	 */
 	public static function get_outer_uploads_folder() {
 		$uploads = wp_upload_dir( null, false );
-		$basedir = ! empty( $uploads['basedir'] ) ? self::normalize_path( $uploads['basedir'] ) : self::normalize_path( ABSPATH . 'wp-content/uploads' );
-		return $basedir . '/libertydev-site-migrator';
+		if ( ! empty( $uploads['error'] ) || empty( $uploads['basedir'] ) ) {
+			return '';
+		}
+		return self::normalize_path( $uploads['basedir'] ) . '/libertydev-site-migrator';
 	}
 
 	/**
@@ -153,7 +160,11 @@ class LDSM_Storage {
 	 * @return string
 	 */
 	public static function get_backups_dir() {
-		return self::get_outer_uploads_folder() . '/vault-' . self::get_or_create_vault_key();
+		$outer = self::get_outer_uploads_folder();
+		if ( '' === $outer ) {
+			return '';
+		}
+		return $outer . '/vault-' . self::get_or_create_vault_key();
 	}
 
 	/**
@@ -162,7 +173,11 @@ class LDSM_Storage {
 	 * @return string
 	 */
 	public static function get_jobs_root() {
-		return self::get_backups_dir() . '/jobs';
+		$vault = self::get_backups_dir();
+		if ( '' === $vault ) {
+			return '';
+		}
+		return $vault . '/jobs';
 	}
 
 	/**
@@ -176,9 +191,9 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Validate backup archive filename strictly.
+	 * Validate logical backup archive filename strictly (ends with .zip).
 	 *
-	 * @param string $filename Archive filename.
+	 * @param string $filename Logical archive filename.
 	 * @return bool
 	 */
 	public static function is_valid_backup_filename( $filename ) {
@@ -195,6 +210,64 @@ class LDSM_Storage {
 	}
 
 	/**
+	 * Resolve on-disk path for a logical backup filename (prefers Nginx-guarded .zip.php, falls back to legacy .zip).
+	 *
+	 * @param string $filename Logical archive filename ending with .zip.
+	 * @return string Absolute on-disk path or empty string if not found/invalid.
+	 */
+	public static function resolve_backup_disk_path( $filename ) {
+		if ( ! self::is_valid_backup_filename( $filename ) ) {
+			return '';
+		}
+		$dir = self::get_backups_dir();
+		if ( '' === $dir ) {
+			return '';
+		}
+		$guarded = $dir . '/' . $filename . '.php';
+		if ( is_file( $guarded ) && ! is_link( $guarded ) ) {
+			return $guarded;
+		}
+		$legacy = $dir . '/' . $filename;
+		if ( is_file( $legacy ) && ! is_link( $legacy ) ) {
+			return $legacy;
+		}
+		return '';
+	}
+
+	/**
+	 * Detect leading PHP guard header length on a vault file (0 if raw unguarded ZIP/data).
+	 *
+	 * @param string $filepath Absolute file path.
+	 * @return int Leading guard byte count.
+	 */
+	public static function detect_php_guard_length( $filepath ) {
+		if ( ! is_file( $filepath ) || is_link( $filepath ) || ! is_readable( $filepath ) ) {
+			return 0;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Peeking first 64 bytes to detect PHP guard preamble.
+		$fp = @fopen( $filepath, 'rb' );
+		if ( ! $fp ) {
+			return 0;
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
+		$head = fread( $fp, 64 );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		fclose( $fp );
+
+		if ( ! is_string( $head ) || '' === $head ) {
+			return 0;
+		}
+		if ( 0 === strpos( $head, self::PHP_EXIT_GUARD ) ) {
+			return self::PHP_EXIT_GUARD_LEN;
+		}
+		if ( 0 === strpos( $head, '<?php' ) ) {
+			$nl = strpos( $head, "\n" );
+			return ( false !== $nl ) ? ( $nl + 1 ) : 0;
+		}
+		return 0;
+	}
+
+	/**
 	 * Ensure outer folder, secret vault, and jobs directories exist and are hardened across Apache, Nginx, and IIS.
 	 *
 	 * @return bool True on success.
@@ -203,6 +276,10 @@ class LDSM_Storage {
 		$outer_dir   = self::get_outer_uploads_folder();
 		$backups_dir = self::get_backups_dir();
 		$jobs_dir    = self::get_jobs_root();
+
+		if ( '' === $outer_dir || '' === $backups_dir || '' === $jobs_dir ) {
+			return false;
+		}
 
 		foreach ( array( $outer_dir, $backups_dir, $jobs_dir ) as $dir ) {
 			if ( is_link( $dir ) ) {
@@ -244,7 +321,7 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Initialize a PHP-exit-guarded temporary file on disk so direct HTTP requests on Nginx output zero bytes.
+	 * Initialize a PHP-exit-guarded file on disk so direct HTTP requests on Nginx halt compilation and output zero bytes.
 	 *
 	 * @param string $filepath Target .php file path.
 	 * @return bool
@@ -253,7 +330,7 @@ class LDSM_Storage {
 		if ( is_link( $filepath ) ) {
 			return false;
 		}
-		if ( ! file_exists( $filepath ) ) {
+		if ( ! file_exists( $filepath ) || 0 === (int) @filesize( $filepath ) ) {
 			return false !== @file_put_contents( $filepath, self::PHP_EXIT_GUARD, LOCK_EX );
 		}
 		return true;
@@ -275,7 +352,7 @@ class LDSM_Storage {
 			return false;
 		}
 		$payload = self::PHP_EXIT_GUARD . $json;
-		$tmp     = $filepath . '.tmp.' . wp_rand( 1000, 999999 );
+		$tmp     = $filepath . '.tmp.' . wp_rand( 1000, 999999 ) . '.php';
 
 		if ( false === @file_put_contents( $tmp, $payload, LOCK_EX ) ) {
 			return false;
@@ -333,7 +410,6 @@ class LDSM_Storage {
 			return new WP_Error( 'outside_root', 'Target path lies outside allowed directory boundary.' );
 		}
 
-		// Ensure allowed_root exists and is not itself a symlink if newly created.
 		if ( ! is_dir( $root_norm ) ) {
 			if ( is_link( $root_norm ) || ! wp_mkdir_p( $root_norm ) ) {
 				return new WP_Error( 'root_mkdir_failed', 'Could not initialize target root directory.' );
@@ -351,7 +427,6 @@ class LDSM_Storage {
 			}
 			$curr .= '/' . $seg;
 
-			// Block any existing symlink along the directory chain or at the leaf target!
 			if ( is_link( $curr ) ) {
 				return new WP_Error( 'symlink_blocked', 'Refusing to write through symbolic link: ' . $seg );
 			}
@@ -432,7 +507,11 @@ class LDSM_Storage {
 		if ( ! self::is_valid_job_id( $job_id ) ) {
 			return new WP_Error( 'invalid_job_id', 'Invalid migration job identifier.' );
 		}
-		$dir = self::get_jobs_root() . '/' . $job_id;
+		$jobs_root = self::get_jobs_root();
+		if ( '' === $jobs_root ) {
+			return new WP_Error( 'storage_unavailable', 'Uploads directory is unavailable.' );
+		}
+		$dir = $jobs_root . '/' . $job_id;
 		if ( ! is_dir( $dir ) || is_link( $dir ) ) {
 			return new WP_Error( 'job_not_found', 'Migration job workspace not found or already completed.' );
 		}
@@ -482,8 +561,12 @@ class LDSM_Storage {
 		if ( ! self::is_valid_job_id( $job_id ) ) {
 			return;
 		}
-		$dir = self::get_jobs_root() . '/' . $job_id;
-		if ( is_dir( $dir ) ) {
+		$jobs_root = self::get_jobs_root();
+		if ( '' === $jobs_root ) {
+			return;
+		}
+		$dir = $jobs_root . '/' . $job_id;
+		if ( is_dir( $dir ) && ! is_link( $dir ) ) {
 			self::delete_dir_recursive( $dir );
 		}
 	}
@@ -494,8 +577,9 @@ class LDSM_Storage {
 	public static function cleanup_stale_jobs() {
 		$cutoff   = time() - DAY_IN_SECONDS;
 		$jobs_dir = self::get_jobs_root();
+		$vault    = self::get_backups_dir();
 
-		if ( is_dir( $jobs_dir ) ) {
+		if ( '' !== $jobs_dir && is_dir( $jobs_dir ) ) {
 			$items = @scandir( $jobs_dir );
 			if ( is_array( $items ) ) {
 				foreach ( $items as $item ) {
@@ -514,22 +598,27 @@ class LDSM_Storage {
 			}
 		}
 
-		$parts = glob( self::get_backups_dir() . '/*.zip.part' );
-		if ( is_array( $parts ) ) {
-			foreach ( $parts as $part_file ) {
-				$mt = (int) @filemtime( $part_file );
-				if ( $mt > 0 && $mt < $cutoff ) {
-					wp_delete_file( $part_file );
+		if ( '' !== $vault && is_dir( $vault ) ) {
+			$patterns = array( $vault . '/*.zip.part.php', $vault . '/*.zip.part' );
+			foreach ( $patterns as $pat ) {
+				$parts = glob( $pat );
+				if ( is_array( $parts ) ) {
+					foreach ( $parts as $part_file ) {
+						$mt = (int) @filemtime( $part_file );
+						if ( $mt > 0 && $mt < $cutoff ) {
+							wp_delete_file( $part_file );
+						}
+					}
 				}
 			}
 		}
 	}
 
 	/**
-	 * Generate a cryptographically unguessable backup filename (128-bit random suffix).
+	 * Generate a cryptographically unguessable logical backup filename ending in .zip.
 	 *
 	 * @param string $trigger 'export', 'manual', or 'scheduled'.
-	 * @return string Filename ending with .zip
+	 * @return string Logical filename ending with .zip
 	 */
 	public static function generate_backup_filename( $trigger = 'export' ) {
 		$host = wp_parse_url( home_url(), PHP_URL_HOST );
@@ -557,29 +646,51 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * List all stored .zip archives inside the secret vault sorted newest first.
+	 * List all stored archives inside the secret vault (guarded .zip.php and legacy .zip) sorted newest first.
 	 *
 	 * @return array<int,array<string,mixed>>
 	 */
 	public static function list_backups() {
 		$dir = self::get_backups_dir();
-		if ( ! is_dir( $dir ) ) {
+		if ( '' === $dir || ! is_dir( $dir ) ) {
 			return array();
 		}
 
-		$files = glob( $dir . '/*.zip' );
-		if ( empty( $files ) || ! is_array( $files ) ) {
+		$guarded_files = glob( $dir . '/*.zip.php' );
+		$legacy_files  = glob( $dir . '/*.zip' );
+		$all_paths     = array();
+
+		if ( is_array( $guarded_files ) ) {
+			foreach ( $guarded_files as $gp ) {
+				$logical               = substr( basename( $gp ), 0, -4 );
+				$all_paths[ $logical ] = $gp;
+			}
+		}
+		if ( is_array( $legacy_files ) ) {
+			foreach ( $legacy_files as $lp ) {
+				$logical = basename( $lp );
+				if ( ! isset( $all_paths[ $logical ] ) ) {
+					$all_paths[ $logical ] = $lp;
+				}
+			}
+		}
+
+		if ( empty( $all_paths ) ) {
 			return array();
 		}
 
 		$is_admin_ctx = is_user_logged_in() && current_user_can( 'manage_options' );
 		$list         = array();
 
-		foreach ( $files as $filepath ) {
-			$filename  = basename( $filepath );
-			$size      = (float) @filesize( $filepath );
+		foreach ( $all_paths as $filename => $filepath ) {
+			if ( is_link( $filepath ) || ! self::is_valid_backup_filename( $filename ) ) {
+				continue;
+			}
+			$disk_size = (float) @filesize( $filepath );
+			$guard_len = self::detect_php_guard_length( $filepath );
+			$size      = max( 0.0, $disk_size - $guard_len );
 			$mtime     = (int) @filemtime( $filepath );
-			$meta_file = substr( $filepath, 0, -4 ) . '.meta.php';
+			$meta_file = $dir . '/' . substr( $filename, 0, -4 ) . '.meta.php';
 			$meta      = self::read_guarded_json_file( $meta_file );
 			if ( ! is_array( $meta ) ) {
 				$meta = array();
@@ -671,25 +782,38 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Delete a stored backup .zip and its guarded sidecar .meta.php.
+	 * Delete a stored backup (.zip.php or legacy .zip) and its guarded sidecar .meta.php.
 	 *
-	 * @param string $filename Archive filename.
+	 * @param string $filename Logical archive filename ending with .zip.
 	 * @return bool|WP_Error
 	 */
 	public static function delete_backup( $filename ) {
 		if ( ! self::is_valid_backup_filename( $filename ) ) {
 			return new WP_Error( 'invalid_filename', 'Invalid backup filename.' );
 		}
-		$filepath = self::get_backups_dir() . '/' . $filename;
-		if ( ! file_exists( $filepath ) ) {
+		$dir = self::get_backups_dir();
+		if ( '' === $dir ) {
+			return new WP_Error( 'storage_unavailable', 'Uploads vault directory is unavailable.' );
+		}
+
+		$guarded = $dir . '/' . $filename . '.php';
+		$legacy  = $dir . '/' . $filename;
+
+		if ( ! file_exists( $guarded ) && ! file_exists( $legacy ) ) {
 			return new WP_Error( 'not_found', 'Backup archive does not exist.' );
 		}
-		$meta_file = substr( $filepath, 0, -4 ) . '.meta.php';
+
+		$meta_file = $dir . '/' . substr( $filename, 0, -4 ) . '.meta.php';
 		if ( file_exists( $meta_file ) ) {
 			wp_delete_file( $meta_file );
 		}
-		wp_delete_file( $filepath );
-		if ( file_exists( $filepath ) ) {
+		if ( file_exists( $guarded ) ) {
+			wp_delete_file( $guarded );
+		}
+		if ( file_exists( $legacy ) ) {
+			wp_delete_file( $legacy );
+		}
+		if ( file_exists( $guarded ) || file_exists( $legacy ) ) {
 			return new WP_Error( 'delete_failed', 'Could not delete backup file from disk.' );
 		}
 		return true;

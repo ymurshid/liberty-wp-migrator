@@ -40,8 +40,9 @@ if ( ! empty( $uploads['basedir'] ) ) {
 				$wp_filesystem->delete( $jobs_dir, true );
 			}
 
-			$remaining_zips = glob( $vault_dir . '/*.zip' );
-			if ( empty( $remaining_zips ) ) {
+			$remaining_guarded = glob( $vault_dir . '/*.zip.php' );
+			$remaining_legacy  = glob( $vault_dir . '/*.zip' );
+			if ( empty( $remaining_guarded ) && empty( $remaining_legacy ) ) {
 				delete_option( 'ldsm_vault_key' );
 				if ( $wp_filesystem ) {
 					$wp_filesystem->delete( $base_dir, true );

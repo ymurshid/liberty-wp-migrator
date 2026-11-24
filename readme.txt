@@ -58,7 +58,7 @@ Yes. On the Pre-Import Review screen, keep **"Preserve my current Administrator 
 
 = Where are backups stored, and are they protected on Nginx as well as Apache? =
 
-Yes. Backups are stored inside your WordPress uploads directory under a cryptographically randomized 128-bit vault folder (`uploads/libertydev-site-migrator/vault-{secret}/`) with `index.php` directory shields at every level, `.htaccess` (Apache/LiteSpeed), `web.config` (IIS), 96-bit randomized archive filenames, and `<?php exit; ?>` execution guards on all temporary job/SQL files so Nginx cannot enumerate or expose sensitive data.
+Yes. Backups are stored inside your WordPress uploads directory under a cryptographically randomized 128-bit vault folder (`uploads/libertydev-site-migrator/vault-{secret}/`) with `index.php` directory shields at every level, `.htaccess` (Apache/LiteSpeed), `web.config` (IIS), 96-bit randomized filenames, and `<?php exit; __halt_compiler();` execution guards on every stored archive (`.zip.php`) and temporary job/SQL file so Nginx never exposes backup or database bytes over HTTP. Downloads transparently strip the PHP guard and deliver standard `.zip` files with HTTP Range resume support.
 
 == Screenshots ==
 
@@ -71,7 +71,7 @@ Yes. Backups are stored inside your WordPress uploads directory under a cryptogr
 
 = 1.3.0 =
 * Renamed plugin to LibertyDev Site Migrator (`libertydev-site-migrator`) with `LDSM_` / `ldsm_` prefixing per WordPress.org Plugin Directory guidelines.
-* Hardened backup vault for Nginx and all web servers using a 128-bit secret vault directory inside `wp_upload_dir()`, `index.php` shields, and `<?php exit; ?>` execution guards on all temporary state, manifest, index, and SQL dump files.
+* Hardened backup vault for Nginx and all web servers using a 128-bit secret vault directory inside `wp_upload_dir()`, `index.php` shields, and `<?php exit; __halt_compiler();` execution guards on all stored archives (`.zip.php`) as well as temporary state, manifest, index, and SQL dump files.
 * Added segment-by-segment anti-symlink (`is_link()`) and canonical `realpath()` boundary verification across all archive extraction and file restore paths.
 * Replaced hardcoded `WP_CONTENT_DIR` assumptions with dynamic WordPress directory resolution (`wp_upload_dir()`, `WP_PLUGIN_DIR`, `WPMU_PLUGIN_DIR`, `get_theme_root()`, `WP_LANG_DIR`).
 * Enforced immediate recursive input sanitization across all `$_POST` and `$_FILES` AJAX payloads and removed promotional signatures from scheduled notification emails.

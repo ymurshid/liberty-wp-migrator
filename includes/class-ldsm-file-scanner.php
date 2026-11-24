@@ -64,7 +64,7 @@ class LDSM_File_Scanner {
 				if ( $exclude_media && 'uploads' === $root_key ) {
 					continue;
 				}
-				if ( is_dir( $abs_root ) && is_readable( $abs_root ) && ! is_link( $abs_root ) ) {
+				if ( is_dir( $abs_root ) && is_readable( $abs_root ) ) {
 					$queue[] = array(
 						'root' => $root_key,
 						'sub'  => '',
@@ -104,7 +104,7 @@ class LDSM_File_Scanner {
 			$root_abs = $roots[ $root_key ];
 			$full_dir = '' === $sub_dir ? $root_abs : ( $root_abs . '/' . $sub_dir );
 
-			if ( ! is_dir( $full_dir ) || is_link( $full_dir ) || ! is_readable( $full_dir ) ) {
+			if ( ! is_dir( $full_dir ) || ( '' !== $sub_dir && is_link( $full_dir ) ) || ! is_readable( $full_dir ) ) {
 				continue;
 			}
 

@@ -2,8 +2,9 @@
 /**
  * Pure-PHP Resumable Append-Only Streaming ZIP / ZIP64 Writer — LibertyDev Site Migrator.
  *
- * Uses PHP-exit-guarded central_dir.php metadata log and supports skipping leading guard bytes
- * when streaming temporary database.sql.php dumps into standard ZIP entries.
+ * Writes every archive file on disk (.zip.part.php / .zip.php) prefixed at byte 0 with
+ * LDSM_Storage::PHP_EXIT_GUARD ("<?php exit; __halt_compiler();\n") while keeping all internal
+ * PKZIP/ZIP64 offsets 0-based so stripped downloads are 100% standard ZIP archives.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -74,11 +75,36 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Append an in-memory string entry (e.g. manifest.json) to the streaming ZIP archive.
+	 * Ensure guarded .zip.part.php starts with PHP_EXIT_GUARD and open it positioned at logical ZIP offset.
 	 *
-	 * @param string $zip_path   Path to .zip.part file.
+	 * @param string $zip_path       Path to guarded .zip.part.php file.
+	 * @param int    $logical_offset 0-based logical ZIP byte offset.
+	 * @return resource|WP_Error
+	 */
+	private static function open_guarded_zip_at( $zip_path, $logical_offset ) {
+		if ( ! LDSM_Storage::ensure_guarded_php_file( $zip_path ) ) {
+			return new WP_Error( 'zip_guard_failed', 'Cannot initialize PHP-guarded temporary ZIP archive.' );
+		}
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming random-offset binary archive I/O requires native file pointers.
+		$fp = @fopen( $zip_path, 'r+b' );
+		if ( ! $fp ) {
+			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
+		}
+		$phys_offset = LDSM_Storage::PHP_EXIT_GUARD_LEN + (int) $logical_offset;
+		if ( 0 !== @fseek( $fp, $phys_offset, SEEK_SET ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			fclose( $fp );
+			return new WP_Error( 'zip_seek_failed', 'Failed seeking to ZIP archive offset.' );
+		}
+		return $fp;
+	}
+
+	/**
+	 * Append an in-memory string entry (e.g. manifest.json) to the guarded streaming ZIP archive.
+	 *
+	 * @param string $zip_path   Path to guarded .zip.part.php file.
 	 * @param string $cd_php     Path to PHP-guarded central_dir.php metadata log.
-	 * @param int    $zip_offset Current write offset in .zip.part (updated by reference).
+	 * @param int    $zip_offset Current 0-based logical ZIP offset (updated by reference).
 	 * @param string $entry_name Internal ZIP path.
 	 * @param string $content    Raw string bytes.
 	 * @param int    $mtime      Optional Unix timestamp.
@@ -102,16 +128,9 @@ class LDSM_Stream_Zip_Writer {
 		}
 		$comp_size = strlen( $comp_data );
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming random-offset binary archive I/O requires native file pointers.
-		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
-		if ( ! $fp ) {
-			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
-		}
-
-		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $fp );
-			return new WP_Error( 'zip_seek_failed', 'Failed seeking to ZIP archive offset.' );
+		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		if ( is_wp_error( $fp ) ) {
+			return $fp;
 		}
 
 		$header_offset = $zip_offset;
@@ -143,11 +162,11 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Add or continue streaming a file from disk into the .zip.part archive.
+	 * Add or continue streaming a file from disk into the guarded .zip.part.php archive.
 	 *
-	 * @param string     $zip_path           Path to .zip.part file.
+	 * @param string     $zip_path           Path to guarded .zip.part.php file.
 	 * @param string     $cd_php             Path to PHP-guarded central_dir.php metadata log.
-	 * @param int        $zip_offset         Current end offset in .zip.part (updated by reference).
+	 * @param int        $zip_offset         Current 0-based logical ZIP offset (updated by reference).
 	 * @param string     $source_path        Absolute file path on disk.
 	 * @param string     $entry_name         Relative path inside the ZIP archive.
 	 * @param array|null $partial            Active partial-file transfer state (updated by reference).
@@ -205,15 +224,9 @@ class LDSM_Stream_Zip_Writer {
 			unset( $raw );
 			$comp_size = strlen( $comp_data );
 
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-			$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
-			if ( ! $fp ) {
-				return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
-			}
-			if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-				fclose( $fp );
-				return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
+			$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+			if ( is_wp_error( $fp ) ) {
+				return $fp;
 			}
 
 			$header_offset = $zip_offset;
@@ -261,15 +274,9 @@ class LDSM_Stream_Zip_Writer {
 		}
 		$crc_le4 = strrev( (string) hex2bin( $crc_hex ) );
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
-		if ( ! $fp ) {
-			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
-		}
-		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $fp );
-			return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
+		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		if ( is_wp_error( $fp ) ) {
+			return $fp;
 		}
 
 		$header_offset = $zip_offset;
@@ -334,10 +341,10 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Stream-compress a 6 MB – 96 MB text/SQL file in 1 MB RAM chunks.
+	 * Stream-compress a 6 MB – 96 MB text/SQL file in 1 MB RAM chunks via a PHP-guarded temp stream.
 	 */
 	private static function stream_deflate_medium_file( $zip_path, $cd_php, &$zip_offset, $source_path, $entry_name, $mtime, $skip_bytes = 0 ) {
-		$tmp_deflated = $zip_path . '.deflate.tmp';
+		$tmp_deflated = $zip_path . '.deflate.tmp.php';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$src = @fopen( $source_path, 'rb' );
 		if ( ! $src ) {
@@ -354,6 +361,16 @@ class LDSM_Stream_Zip_Writer {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			return new WP_Error( 'tmp_open_failed', 'Cannot open temp deflate buffer.' );
+		}
+
+		// Guard even transient deflate buffers with PHP exit + halt_compiler.
+		if ( false === self::fwrite_all( $dst, LDSM_Storage::PHP_EXIT_GUARD ) ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			fclose( $src );
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+			fclose( $dst );
+			wp_delete_file( $tmp_deflated );
+			return new WP_Error( 'tmp_guard_failed', 'Failed writing temp deflate guard.' );
 		}
 
 		$deflate_ctx = @deflate_init( ZLIB_ENCODING_RAW, array( 'level' => 6 ) );
@@ -417,17 +434,10 @@ class LDSM_Stream_Zip_Writer {
 		$crc_hex = str_pad( hash_final( $hash_ctx ), 8, '0', STR_PAD_LEFT );
 		$crc_le4 = strrev( (string) hex2bin( $crc_hex ) );
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
-		if ( ! $fp ) {
+		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		if ( is_wp_error( $fp ) ) {
 			wp_delete_file( $tmp_deflated );
-			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive.' );
-		}
-		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $fp );
-			wp_delete_file( $tmp_deflated );
-			return new WP_Error( 'zip_seek_failed', 'Failed seeking in ZIP archive.' );
+			return $fp;
 		}
 
 		$header_offset = $zip_offset;
@@ -441,7 +451,11 @@ class LDSM_Stream_Zip_Writer {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$def_in = @fopen( $tmp_deflated, 'rb' );
-		if ( ! $def_in ) {
+		if ( ! $def_in || 0 !== @fseek( $def_in, LDSM_Storage::PHP_EXIT_GUARD_LEN, SEEK_SET ) ) {
+			if ( $def_in ) {
+				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+				fclose( $def_in );
+			}
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			wp_delete_file( $tmp_deflated );
@@ -496,19 +510,18 @@ class LDSM_Stream_Zip_Writer {
 			return new WP_Error( 'large_src_open_failed', 'Lost access to large source file during archiving: ' . $partial['entry_name'] );
 		}
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$fp = @fopen( $zip_path, 'r+b' );
-		if ( ! $fp ) {
+		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		if ( is_wp_error( $fp ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
-			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
+			return $fp;
 		}
 
 		$skip_bytes   = isset( $partial['skip_bytes'] ) ? (int) $partial['skip_bytes'] : 0;
 		$bytes_copied = (int) $partial['bytes_copied'];
 		$expected     = (int) $partial['uncomp_size'];
 
-		if ( 0 !== @fseek( $src, $skip_bytes + $bytes_copied, SEEK_SET ) || 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $src, $skip_bytes + $bytes_copied, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
@@ -570,18 +583,12 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Finalize the streaming ZIP archive by writing Central Directory headers and EOCD.
+	 * Finalize the guarded streaming ZIP archive by writing Central Directory headers and EOCD.
 	 */
 	public static function finalize_archive( $zip_path, $cd_php, &$zip_offset ) {
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
-		if ( ! $fp ) {
-			return new WP_Error( 'zip_open_failed', 'Cannot open ZIP archive to write Central Directory.' );
-		}
-		if ( 0 !== @fseek( $fp, $zip_offset, SEEK_SET ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $fp );
-			return new WP_Error( 'zip_seek_failed', 'Cannot seek to Central Directory offset.' );
+		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		if ( is_wp_error( $fp ) ) {
+			return $fp;
 		}
 
 		$cd_start_offset = $zip_offset;
@@ -686,7 +693,7 @@ class LDSM_Stream_Zip_Writer {
 		}
 
 		$zip_offset += 22;
-		@ftruncate( $fp, $zip_offset );
+		@ftruncate( $fp, LDSM_Storage::PHP_EXIT_GUARD_LEN + $zip_offset );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
@@ -801,13 +808,13 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Reliably write all bytes to a stream handle.
+	 * Write complete byte buffer reliably.
 	 */
 	private static function fwrite_all( $fp, $data ) {
-		$total   = strlen( $data );
+		$len     = strlen( $data );
 		$written = 0;
-		while ( $written < $total ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+		while ( $written < $len ) {
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Streaming binary ZIP payload into PHP-guarded .zip.part.php inside unguessable vault.
 			$n = @fwrite( $fp, 0 === $written ? $data : substr( $data, $written ) );
 			if ( false === $n || 0 === $n ) {
 				return false;

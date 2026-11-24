@@ -225,12 +225,12 @@ class LDSM_Exporter {
 			);
 		}
 
-		// Phase 4: Write Central Directory & EOCD, move archive into secret vault, write guarded .meta.php, clean job dir.
+		// Phase 4: Write Central Directory & EOCD, move guarded .zip.php archive into secret vault, write guarded .meta.php, clean job dir.
 		if ( 'finalize_zip' === $phase ) {
-			$backups_dir = LDSM_Storage::get_backups_dir();
-			$zip_part    = $job_dir . '/archive.zip.part';
-			$final_zip   = $backups_dir . '/' . $state['backup_filename'];
-			$cd_php      = $job_dir . '/central_dir.php';
+			$backups_dir     = LDSM_Storage::get_backups_dir();
+			$zip_part        = $job_dir . '/archive.zip.part.php';
+			$final_disk_path = $backups_dir . '/' . $state['backup_filename'] . '.php';
+			$cd_php          = $job_dir . '/central_dir.php';
 
 			$fin = LDSM_Stream_Zip_Writer::finalize_archive( $zip_part, $cd_php, $state['zip_offset'] );
 			if ( is_wp_error( $fin ) ) {
@@ -239,19 +239,19 @@ class LDSM_Exporter {
 				return $fin;
 			}
 
-			if ( ! LDSM_Storage::move_file( $zip_part, $final_zip ) ) {
+			if ( ! LDSM_Storage::move_file( $zip_part, $final_disk_path ) ) {
 				wp_delete_file( $zip_part );
 				LDSM_Storage::delete_job( $job_id );
 				return new WP_Error( 'zip_move_failed', 'Failed moving finalized archive into backups vault.' );
 			}
 
-			$meta_php = substr( $final_zip, 0, -4 ) . '.meta.php';
+			$meta_php = $backups_dir . '/' . substr( $state['backup_filename'], 0, -4 ) . '.meta.php';
 			if ( ! empty( $state['manifest_summary'] ) && is_array( $state['manifest_summary'] ) ) {
 				LDSM_Storage::write_guarded_json_file( $meta_php, $state['manifest_summary'] );
 			}
 
-			clearstatcache( true, $final_zip );
-			$final_size = (float) @filesize( $final_zip );
+			clearstatcache( true, $final_disk_path );
+			$final_size = max( 0.0, (float) @filesize( $final_disk_path ) - LDSM_Storage::PHP_EXIT_GUARD_LEN );
 			$trigger    = isset( $state['trigger'] ) ? (string) $state['trigger'] : 'export';
 
 			LDSM_Storage::delete_job( $job_id );
@@ -301,7 +301,7 @@ class LDSM_Exporter {
 	private static function archive_step( $job_dir, array &$state, $deadline ) {
 		global $wpdb;
 
-		$zip_part = $job_dir . '/archive.zip.part';
+		$zip_part = $job_dir . '/archive.zip.part.php';
 		$cd_php   = $job_dir . '/central_dir.php';
 		$roots    = LDSM_Storage::get_content_roots();
 
@@ -525,14 +525,23 @@ class LDSM_Exporter {
 	public static function abort_export_files( array $state ) {
 		if ( ! empty( $state['job_id'] ) ) {
 			$jdir = LDSM_Storage::get_job_dir( (string) $state['job_id'] );
-			if ( ! is_wp_error( $jdir ) && file_exists( $jdir . '/archive.zip.part' ) ) {
-				wp_delete_file( $jdir . '/archive.zip.part' );
+			if ( ! is_wp_error( $jdir ) ) {
+				foreach ( array( 'archive.zip.part.php', 'archive.zip.part' ) as $part_name ) {
+					if ( file_exists( $jdir . '/' . $part_name ) ) {
+						wp_delete_file( $jdir . '/' . $part_name );
+					}
+				}
 			}
 		}
 		if ( ! empty( $state['backup_filename'] ) ) {
-			$part = LDSM_Storage::get_backups_dir() . '/' . $state['backup_filename'] . '.part';
-			if ( file_exists( $part ) ) {
-				wp_delete_file( $part );
+			$bdir = LDSM_Storage::get_backups_dir();
+			if ( '' !== $bdir ) {
+				foreach ( array( '.part.php', '.part' ) as $suffix ) {
+					$part = $bdir . '/' . $state['backup_filename'] . $suffix;
+					if ( file_exists( $part ) ) {
+						wp_delete_file( $part );
+					}
+				}
 			}
 		}
 	}

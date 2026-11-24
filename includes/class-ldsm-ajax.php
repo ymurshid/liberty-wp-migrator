@@ -374,8 +374,8 @@ class LDSM_Ajax {
 			wp_die( 'Download link expired. Please refresh the LibertyDev Site Migrator page.', 'Forbidden', array( 'response' => 403 ) );
 		}
 
-		$filepath = LDSM_Storage::get_backups_dir() . '/' . $filename;
-		if ( ! is_file( $filepath ) || is_link( $filepath ) || ! is_readable( $filepath ) ) {
+		$filepath = LDSM_Storage::resolve_backup_disk_path( $filename );
+		if ( '' === $filepath || ! is_file( $filepath ) || is_link( $filepath ) || ! is_readable( $filepath ) ) {
 			wp_die( 'Backup archive not found.', 'Not Found', array( 'response' => 404 ) );
 		}
 
@@ -384,9 +384,11 @@ class LDSM_Ajax {
 		}
 
 		clearstatcache( true, $filepath );
-		$size  = (int) @filesize( $filepath );
-		$start = 0;
-		$end   = max( 0, $size - 1 );
+		$guard_len = LDSM_Storage::detect_php_guard_length( $filepath );
+		$disk_size = (int) @filesize( $filepath );
+		$size      = max( 0, $disk_size - $guard_len );
+		$start     = 0;
+		$end       = max( 0, $size - 1 );
 
 		nocache_headers();
 		header( 'Content-Type: application/zip' );
@@ -422,8 +424,8 @@ class LDSM_Ajax {
 			}
 			exit;
 		}
-		if ( $start > 0 ) {
-			@fseek( $fp, $start, SEEK_SET );
+		if ( ( $guard_len + $start ) > 0 ) {
+			@fseek( $fp, $guard_len + $start, SEEK_SET );
 		}
 
 		$remaining = $length;
