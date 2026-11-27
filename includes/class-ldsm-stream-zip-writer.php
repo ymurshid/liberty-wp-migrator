@@ -2,9 +2,8 @@
 /**
  * Pure-PHP Resumable Append-Only Streaming ZIP / ZIP64 Writer — LibertyDev Site Migrator.
  *
- * Writes every archive file on disk (.zip.part.php / .zip.php) prefixed at byte 0 with
- * LDSM_Storage::PHP_EXIT_GUARD ("<?php exit; __halt_compiler();\n") while keeping all internal
- * PKZIP/ZIP64 offsets 0-based so stripped downloads are 100% standard ZIP archives.
+ * Writes non-executable protected data files (archive.zip.part, central_dir.dat, deflate.tmp)
+ * inside the unguessable uploads vault directory.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -75,23 +74,22 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Ensure guarded .zip.part.php starts with PHP_EXIT_GUARD and open it positioned at logical ZIP offset.
+	 * Open archive.zip.part safely (blocking symlinks) positioned at $zip_offset.
 	 *
-	 * @param string $zip_path       Path to guarded .zip.part.php file.
-	 * @param int    $logical_offset 0-based logical ZIP byte offset.
+	 * @param string $zip_path   Path to archive.zip.part file.
+	 * @param int    $zip_offset 0-based byte offset.
 	 * @return resource|WP_Error
 	 */
-	private static function open_guarded_zip_at( $zip_path, $logical_offset ) {
-		if ( ! LDSM_Storage::ensure_guarded_php_file( $zip_path ) ) {
-			return new WP_Error( 'zip_guard_failed', 'Cannot initialize PHP-guarded temporary ZIP archive.' );
+	private static function open_zip_at( $zip_path, $zip_offset ) {
+		if ( is_link( $zip_path ) ) {
+			return new WP_Error( 'zip_symlink_blocked', 'Refusing to write archive through symbolic link.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming random-offset binary archive I/O requires native file pointers.
-		$fp = @fopen( $zip_path, 'r+b' );
+		$fp = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $fp ) {
 			return new WP_Error( 'zip_open_failed', 'Cannot open temporary ZIP archive for writing.' );
 		}
-		$phys_offset = LDSM_Storage::PHP_EXIT_GUARD_LEN + (int) $logical_offset;
-		if ( 0 !== @fseek( $fp, $phys_offset, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $fp, (int) $zip_offset, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			return new WP_Error( 'zip_seek_failed', 'Failed seeking to ZIP archive offset.' );
@@ -100,17 +98,17 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Append an in-memory string entry (e.g. manifest.json) to the guarded streaming ZIP archive.
+	 * Append an in-memory string entry (e.g. manifest.json) to the streaming ZIP archive.
 	 *
-	 * @param string $zip_path   Path to guarded .zip.part.php file.
-	 * @param string $cd_php     Path to PHP-guarded central_dir.php metadata log.
-	 * @param int    $zip_offset Current 0-based logical ZIP offset (updated by reference).
+	 * @param string $zip_path   Path to archive.zip.part file.
+	 * @param string $cd_dat     Path to protected central_dir.dat metadata log.
+	 * @param int    $zip_offset Current 0-based ZIP offset (updated by reference).
 	 * @param string $entry_name Internal ZIP path.
 	 * @param string $content    Raw string bytes.
 	 * @param int    $mtime      Optional Unix timestamp.
 	 * @return true|WP_Error
 	 */
-	public static function add_from_string( $zip_path, $cd_php, &$zip_offset, $entry_name, $content, $mtime = 0 ) {
+	public static function add_from_string( $zip_path, $cd_dat, &$zip_offset, $entry_name, $content, $mtime = 0 ) {
 		$entry_name  = self::sanitize_entry_name( $entry_name );
 		$mtime       = $mtime > 0 ? (int) $mtime : time();
 		$uncomp_size = strlen( $content );
@@ -128,7 +126,7 @@ class LDSM_Stream_Zip_Writer {
 		}
 		$comp_size = strlen( $comp_data );
 
-		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		$fp = self::open_zip_at( $zip_path, $zip_offset );
 		if ( is_wp_error( $fp ) ) {
 			return $fp;
 		}
@@ -147,7 +145,7 @@ class LDSM_Stream_Zip_Writer {
 		fclose( $fp );
 
 		return self::record_central_dir_entry(
-			$cd_php,
+			$cd_dat,
 			array(
 				'name'        => $entry_name,
 				'method'      => $method,
@@ -162,21 +160,19 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Add or continue streaming a file from disk into the guarded .zip.part.php archive.
+	 * Add or continue streaming a file from disk into the archive.zip.part file.
 	 *
-	 * @param string     $zip_path           Path to guarded .zip.part.php file.
-	 * @param string     $cd_php             Path to PHP-guarded central_dir.php metadata log.
-	 * @param int        $zip_offset         Current 0-based logical ZIP offset (updated by reference).
-	 * @param string     $source_path        Absolute file path on disk.
-	 * @param string     $entry_name         Relative path inside the ZIP archive.
-	 * @param array|null $partial            Active partial-file transfer state (updated by reference).
-	 * @param float      $deadline           Unix microtime deadline for this tick.
-	 * @param int        $skip_leading_bytes Optional leading PHP guard bytes to skip from $source_path.
+	 * @param string     $zip_path    Path to archive.zip.part file.
+	 * @param string     $cd_dat      Path to protected central_dir.dat metadata log.
+	 * @param int        $zip_offset  Current 0-based ZIP offset (updated by reference).
+	 * @param string     $source_path Absolute file path on disk.
+	 * @param string     $entry_name  Relative path inside the ZIP archive.
+	 * @param array|null $partial     Active partial-file transfer state (updated by reference).
+	 * @param float      $deadline    Unix microtime deadline for this tick.
 	 * @return bool|WP_Error
 	 */
-	public static function add_file_chunked( $zip_path, $cd_php, &$zip_offset, $source_path, $entry_name, &$partial, $deadline, $skip_leading_bytes = 0 ) {
+	public static function add_file_chunked( $zip_path, $cd_dat, &$zip_offset, $source_path, $entry_name, &$partial, $deadline ) {
 		$entry_name = self::sanitize_entry_name( $entry_name );
-		$skip_bytes = max( 0, (int) $skip_leading_bytes );
 
 		if ( ! is_file( $source_path ) || is_link( $source_path ) || ! is_readable( $source_path ) ) {
 			$partial = null;
@@ -184,13 +180,12 @@ class LDSM_Stream_Zip_Writer {
 		}
 
 		if ( is_array( $partial ) && isset( $partial['entry_name'] ) && $partial['entry_name'] === $entry_name ) {
-			return self::continue_large_store_file( $zip_path, $cd_php, $zip_offset, $source_path, $partial, $deadline );
+			return self::continue_large_store_file( $zip_path, $cd_dat, $zip_offset, $source_path, $partial, $deadline );
 		}
 
 		clearstatcache( true, $source_path );
-		$raw_file_size = (int) @filesize( $source_path );
-		$uncomp_size   = max( 0, $raw_file_size - $skip_bytes );
-		$mtime         = (int) @filemtime( $source_path );
+		$uncomp_size = max( 0, (int) @filesize( $source_path ) );
+		$mtime       = (int) @filemtime( $source_path );
 		if ( $mtime <= 0 ) {
 			$mtime = time();
 		}
@@ -203,9 +198,6 @@ class LDSM_Stream_Zip_Writer {
 			if ( false === $raw ) {
 				$partial = null;
 				return true;
-			}
-			if ( $skip_bytes > 0 ) {
-				$raw = ( strlen( $raw ) > $skip_bytes ) ? substr( $raw, $skip_bytes ) : '';
 			}
 			$actual_len = strlen( $raw );
 			$crc_hex    = hash( 'crc32b', $raw );
@@ -224,7 +216,7 @@ class LDSM_Stream_Zip_Writer {
 			unset( $raw );
 			$comp_size = strlen( $comp_data );
 
-			$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+			$fp = self::open_zip_at( $zip_path, $zip_offset );
 			if ( is_wp_error( $fp ) ) {
 				return $fp;
 			}
@@ -244,7 +236,7 @@ class LDSM_Stream_Zip_Writer {
 
 			$partial = null;
 			$rec     = self::record_central_dir_entry(
-				$cd_php,
+				$cd_dat,
 				array(
 					'name'        => $entry_name,
 					'method'      => $method,
@@ -260,21 +252,22 @@ class LDSM_Stream_Zip_Writer {
 		}
 
 		if ( ! $already_compr && $uncomp_size <= 96 * 1024 * 1024 && function_exists( 'deflate_init' ) && function_exists( 'deflate_add' ) ) {
-			$res = self::stream_deflate_medium_file( $zip_path, $cd_php, $zip_offset, $source_path, $entry_name, $mtime, $skip_bytes );
+			$res = self::stream_deflate_medium_file( $zip_path, $cd_dat, $zip_offset, $source_path, $entry_name, $mtime );
 			if ( ! is_wp_error( $res ) ) {
 				$partial = null;
 				return true;
 			}
 		}
 
-		$crc_hex = self::compute_stream_crc32_hex( $source_path, $skip_bytes );
+		$h       = @hash_file( 'crc32b', $source_path );
+		$crc_hex = false !== $h ? str_pad( $h, 8, '0', STR_PAD_LEFT ) : false;
 		if ( false === $crc_hex ) {
 			$partial = null;
 			return true;
 		}
 		$crc_le4 = strrev( (string) hex2bin( $crc_hex ) );
 
-		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		$fp = self::open_zip_at( $zip_path, $zip_offset );
 		if ( is_wp_error( $fp ) ) {
 			return $fp;
 		}
@@ -296,64 +289,23 @@ class LDSM_Stream_Zip_Writer {
 			'entry_name'    => $entry_name,
 			'header_offset' => $header_offset,
 			'uncomp_size'   => $uncomp_size,
-			'skip_bytes'    => $skip_bytes,
 			'bytes_copied'  => 0,
 			'mtime'         => $mtime,
 			'crc_hex'       => $crc_hex,
 		);
 
-		return self::continue_large_store_file( $zip_path, $cd_php, $zip_offset, $source_path, $partial, $deadline );
+		return self::continue_large_store_file( $zip_path, $cd_dat, $zip_offset, $source_path, $partial, $deadline );
 	}
 
 	/**
-	 * Compute 8-char CRC32b hex of $source_path starting at $skip_bytes using zero-RAM streaming.
-	 *
-	 * @param string $source_path File path.
-	 * @param int    $skip_bytes  Leading bytes to skip.
-	 * @return string|false
+	 * Stream-compress a 6 MB – 96 MB text/SQL file in 1 MB RAM chunks via a transient non-executable temp buffer.
 	 */
-	private static function compute_stream_crc32_hex( $source_path, $skip_bytes = 0 ) {
-		if ( 0 === $skip_bytes ) {
-			$h = @hash_file( 'crc32b', $source_path );
-			return false !== $h ? str_pad( $h, 8, '0', STR_PAD_LEFT ) : false;
-		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$fp = @fopen( $source_path, 'rb' );
-		if ( ! $fp ) {
-			return false;
-		}
-		if ( 0 !== @fseek( $fp, $skip_bytes, SEEK_SET ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $fp );
-			return false;
-		}
-		$ctx = hash_init( 'crc32b' );
-		while ( ! feof( $fp ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
-			$buf = fread( $fp, 1024 * 1024 );
-			if ( false !== $buf && '' !== $buf ) {
-				hash_update( $ctx, $buf );
-			}
-		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-		fclose( $fp );
-		return str_pad( hash_final( $ctx ), 8, '0', STR_PAD_LEFT );
-	}
-
-	/**
-	 * Stream-compress a 6 MB – 96 MB text/SQL file in 1 MB RAM chunks via a PHP-guarded temp stream.
-	 */
-	private static function stream_deflate_medium_file( $zip_path, $cd_php, &$zip_offset, $source_path, $entry_name, $mtime, $skip_bytes = 0 ) {
-		$tmp_deflated = $zip_path . '.deflate.tmp.php';
+	private static function stream_deflate_medium_file( $zip_path, $cd_dat, &$zip_offset, $source_path, $entry_name, $mtime ) {
+		$tmp_deflated = $zip_path . '.deflate.tmp';
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$src = @fopen( $source_path, 'rb' );
 		if ( ! $src ) {
 			return new WP_Error( 'src_open_failed', 'Cannot open source file for deflate.' );
-		}
-		if ( $skip_bytes > 0 && 0 !== @fseek( $src, $skip_bytes, SEEK_SET ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $src );
-			return new WP_Error( 'src_seek_failed', 'Cannot seek past guard header.' );
 		}
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$dst = @fopen( $tmp_deflated, 'wb' );
@@ -361,16 +313,6 @@ class LDSM_Stream_Zip_Writer {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			return new WP_Error( 'tmp_open_failed', 'Cannot open temp deflate buffer.' );
-		}
-
-		// Guard even transient deflate buffers with PHP exit + halt_compiler.
-		if ( false === self::fwrite_all( $dst, LDSM_Storage::PHP_EXIT_GUARD ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $src );
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-			fclose( $dst );
-			wp_delete_file( $tmp_deflated );
-			return new WP_Error( 'tmp_guard_failed', 'Failed writing temp deflate guard.' );
 		}
 
 		$deflate_ctx = @deflate_init( ZLIB_ENCODING_RAW, array( 'level' => 6 ) );
@@ -434,7 +376,7 @@ class LDSM_Stream_Zip_Writer {
 		$crc_hex = str_pad( hash_final( $hash_ctx ), 8, '0', STR_PAD_LEFT );
 		$crc_le4 = strrev( (string) hex2bin( $crc_hex ) );
 
-		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		$fp = self::open_zip_at( $zip_path, $zip_offset );
 		if ( is_wp_error( $fp ) ) {
 			wp_delete_file( $tmp_deflated );
 			return $fp;
@@ -451,11 +393,7 @@ class LDSM_Stream_Zip_Writer {
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$def_in = @fopen( $tmp_deflated, 'rb' );
-		if ( ! $def_in || 0 !== @fseek( $def_in, LDSM_Storage::PHP_EXIT_GUARD_LEN, SEEK_SET ) ) {
-			if ( $def_in ) {
-				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-				fclose( $def_in );
-			}
+		if ( ! $def_in ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
 			wp_delete_file( $tmp_deflated );
@@ -486,7 +424,7 @@ class LDSM_Stream_Zip_Writer {
 		$zip_offset = $header_offset + strlen( $local_header ) + $comp_size;
 
 		return self::record_central_dir_entry(
-			$cd_php,
+			$cd_dat,
 			array(
 				'name'        => $entry_name,
 				'method'      => 8,
@@ -503,25 +441,24 @@ class LDSM_Stream_Zip_Writer {
 	/**
 	 * Continue copying bytes of a large STORE-mode file across ticks.
 	 */
-	private static function continue_large_store_file( $zip_path, $cd_php, &$zip_offset, $source_path, &$partial, $deadline ) {
+	private static function continue_large_store_file( $zip_path, $cd_dat, &$zip_offset, $source_path, &$partial, $deadline ) {
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		$src = @fopen( $source_path, 'rb' );
 		if ( ! $src ) {
 			return new WP_Error( 'large_src_open_failed', 'Lost access to large source file during archiving: ' . $partial['entry_name'] );
 		}
 
-		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+		$fp = self::open_zip_at( $zip_path, $zip_offset );
 		if ( is_wp_error( $fp ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			return $fp;
 		}
 
-		$skip_bytes   = isset( $partial['skip_bytes'] ) ? (int) $partial['skip_bytes'] : 0;
 		$bytes_copied = (int) $partial['bytes_copied'];
 		$expected     = (int) $partial['uncomp_size'];
 
-		if ( 0 !== @fseek( $src, $skip_bytes + $bytes_copied, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $src, $bytes_copied, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $src );
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
@@ -565,7 +502,7 @@ class LDSM_Stream_Zip_Writer {
 		fclose( $fp );
 
 		$rec = self::record_central_dir_entry(
-			$cd_php,
+			$cd_dat,
 			array(
 				'name'        => $partial['entry_name'],
 				'method'      => 0,
@@ -583,10 +520,10 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Finalize the guarded streaming ZIP archive by writing Central Directory headers and EOCD.
+	 * Finalize the streaming ZIP archive by writing Central Directory headers and EOCD.
 	 */
-	public static function finalize_archive( $zip_path, $cd_php, &$zip_offset ) {
-		$fp = self::open_guarded_zip_at( $zip_path, $zip_offset );
+	public static function finalize_archive( $zip_path, $cd_dat, &$zip_offset ) {
+		$fp = self::open_zip_at( $zip_path, $zip_offset );
 		if ( is_wp_error( $fp ) ) {
 			return $fp;
 		}
@@ -595,9 +532,9 @@ class LDSM_Stream_Zip_Writer {
 		$cd_size         = 0;
 		$entry_count     = 0;
 
-		if ( file_exists( $cd_php ) ) {
+		if ( file_exists( $cd_dat ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-			$cd_in = @fopen( $cd_php, 'rb' );
+			$cd_in = @fopen( $cd_dat, 'rb' );
 			if ( ! $cd_in ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
@@ -607,7 +544,7 @@ class LDSM_Stream_Zip_Writer {
 			$buffer = '';
 			while ( ( $line = fgets( $cd_in ) ) !== false ) {
 				$line = trim( $line );
-				if ( '' === $line || 0 === strpos( $line, '<?php' ) ) {
+				if ( '' === $line ) {
 					continue;
 				}
 				$meta = json_decode( $line, true );
@@ -693,7 +630,7 @@ class LDSM_Stream_Zip_Writer {
 		}
 
 		$zip_offset += 22;
-		@ftruncate( $fp, LDSM_Storage::PHP_EXIT_GUARD_LEN + $zip_offset );
+		@ftruncate( $fp, $zip_offset );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
@@ -794,14 +731,14 @@ class LDSM_Stream_Zip_Writer {
 	}
 
 	/**
-	 * Append one entry record to PHP-exit-guarded central_dir.php.
+	 * Append one entry record to protected non-executable central_dir.dat.
 	 */
-	private static function record_central_dir_entry( $cd_php, array $record ) {
-		if ( ! LDSM_Storage::ensure_guarded_php_file( $cd_php ) ) {
-			return new WP_Error( 'cd_guard_failed', 'Failed initializing guarded Central Directory log.' );
+	private static function record_central_dir_entry( $cd_dat, array $record ) {
+		if ( is_link( $cd_dat ) ) {
+			return new WP_Error( 'cd_symlink_blocked', 'Refusing to write Central Directory log through symbolic link.' );
 		}
 		$line = wp_json_encode( $record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . "\n";
-		if ( false === @file_put_contents( $cd_php, $line, FILE_APPEND | LOCK_EX ) ) {
+		if ( false === @file_put_contents( $cd_dat, $line, FILE_APPEND | LOCK_EX ) ) {
 			return new WP_Error( 'cd_log_failed', 'Failed recording entry in Central Directory log.' );
 		}
 		return true;
@@ -814,7 +751,7 @@ class LDSM_Stream_Zip_Writer {
 		$len     = strlen( $data );
 		$written = 0;
 		while ( $written < $len ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Streaming binary ZIP payload into PHP-guarded .zip.part.php inside unguessable vault.
+			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Streaming binary ZIP payload into protected archive.zip.part inside unguessable vault.
 			$n = @fwrite( $fp, 0 === $written ? $data : substr( $data, $written ) );
 			if ( false === $n || 0 === $n ) {
 				return false;

@@ -38,11 +38,11 @@ class LDSM_Ajax {
 	}
 
 	/**
-	 * Verify admin capability and AJAX nonce.
+	 * Verify administrator (or Super Admin on Multisite) capability and AJAX nonce.
 	 */
 	private static function verify_request() {
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( array( 'message' => 'Insufficient permissions.' ), 403 );
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			wp_send_json_error( array( 'message' => 'Insufficient permissions. Super Admin permissions are required on Multisite networks.' ), 403 );
 		}
 		if ( ! check_ajax_referer( 'ldsm_ajax_nonce', 'nonce', false ) ) {
 			wp_send_json_error( array( 'message' => 'Security token expired. Please reload the page and try again.' ), 403 );
@@ -360,7 +360,7 @@ class LDSM_Ajax {
 	 * Stream a backup .zip file to the browser with full HTTP Range support.
 	 */
 	public static function handle_download_backup() {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
 			wp_die( 'Forbidden', 'Forbidden', array( 'response' => 403 ) );
 		}
 
@@ -384,11 +384,9 @@ class LDSM_Ajax {
 		}
 
 		clearstatcache( true, $filepath );
-		$guard_len = LDSM_Storage::detect_php_guard_length( $filepath );
-		$disk_size = (int) @filesize( $filepath );
-		$size      = max( 0, $disk_size - $guard_len );
-		$start     = 0;
-		$end       = max( 0, $size - 1 );
+		$size  = (int) @filesize( $filepath );
+		$start = 0;
+		$end   = max( 0, $size - 1 );
 
 		nocache_headers();
 		header( 'Content-Type: application/zip' );
@@ -424,8 +422,8 @@ class LDSM_Ajax {
 			}
 			exit;
 		}
-		if ( ( $guard_len + $start ) > 0 ) {
-			@fseek( $fp, $guard_len + $start, SEEK_SET );
+		if ( $start > 0 ) {
+			@fseek( $fp, $start, SEEK_SET );
 		}
 
 		$remaining = $length;

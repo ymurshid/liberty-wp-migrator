@@ -3,7 +3,7 @@ Contributors: yassermurshid
 Tags: migration, backup, clone, restore, transfer
 Requires at least: 6.2
 Tested up to: 7.1
-Stable tag: 1.3.0
+Stable tag: 1.4.0
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -29,7 +29,7 @@ Move any WordPress site from staging to production—or between completely diffe
 
 = Privacy & Data Handling =
 
-LibertyDev Site Migrator operates **100% locally on your own WordPress server**. It does not connect to any external SaaS API, does not transmit telemetry or user data to third-party servers, and stores all backup archives inside a cryptographically unguessable subdirectory within your WordPress uploads folder (`uploads/libertydev-site-migrator/vault-{key}/`) protected across Apache, Nginx, and IIS.
+LibertyDev Site Migrator operates **100% locally on your own WordPress server**. It does not connect to any external SaaS API, does not transmit telemetry or user data to third-party servers, stores transient migration job state in non-autoloaded WordPress database options, and stores all backup archives and temporary work files as non-executable protected data files inside a cryptographically unguessable subdirectory within your WordPress uploads folder (`uploads/libertydev-site-migrator/vault-{key}/`) shielded across Apache, Nginx, and IIS. On WordPress Multisite, access is restricted exclusively to Network Super Admins.
 
 == Installation ==
 
@@ -56,9 +56,13 @@ Database imports are staged inside isolated shadow tables (`ldsmt_*`) and only s
 
 Yes. On the Pre-Import Review screen, keep **"Preserve my current Administrator account & password"** checked, and LibertyDev Site Migrator will preserve your admin credentials and refresh your authentication cookie seamlessly.
 
-= Where are backups stored, and are they protected on Nginx as well as Apache? =
+= Where are backups stored, and how are they protected? =
 
-Yes. Backups are stored inside your WordPress uploads directory under a cryptographically randomized 128-bit vault folder (`uploads/libertydev-site-migrator/vault-{secret}/`) with `index.php` directory shields at every level, `.htaccess` (Apache/LiteSpeed), `web.config` (IIS), 96-bit randomized filenames, and `<?php exit; __halt_compiler();` execution guards on every stored archive (`.zip.php`) and temporary job/SQL file so Nginx never exposes backup or database bytes over HTTP. Downloads transparently strip the PHP guard and deliver standard `.zip` files with HTTP Range resume support.
+Backups and temporary work files are stored as strictly non-executable data files (`.zip`, `.meta.json`, `.dat`, `.sql`) inside your WordPress uploads directory (`wp_upload_dir()`) under a cryptographically randomized 128-bit vault folder (`uploads/libertydev-site-migrator/vault-{secret}/`) with `.htaccess` (Apache/LiteSpeed), `web.config` (IIS), and `index.html` directory barriers plus 96-bit randomized archive filenames. Transient job state is saved in non-autoloaded WordPress database options, and downloads stream directly through an authenticated admin endpoint with HTTP Range resume support.
+
+= How does LibertyDev Site Migrator handle WordPress Multisite permissions? =
+
+On WordPress Multisite networks, all migration, backup, extraction, and restore capabilities are restricted strictly to Network Super Admins (`is_super_admin()` and `manage_network_options`) so subsite administrators cannot modify shared network plugins, themes, or `mu-plugins`.
 
 == Screenshots ==
 
@@ -69,9 +73,14 @@ Yes. Backups are stored inside your WordPress uploads directory under a cryptogr
 
 == Changelog ==
 
+= 1.4.0 =
+* Moved transient migration job state into non-autoloaded WordPress database options and replaced executable PHP work/archive files with strictly non-executable protected data files (`.zip`, `.meta.json`, `.dat`, `.sql`) inside the 128-bit randomized uploads vault shielded with `.htaccess`, `web.config`, and `index.html`.
+* Restricted all migration, backup, archive extraction, and `mu-plugins` restore operations on WordPress Multisite strictly to Network Super Admins (`is_super_admin()` and `manage_network_options`).
+* Converted all dynamic SQL `SELECT`, `UPDATE`, `RENAME TABLE`, and `DROP TABLE` queries to `$wpdb->prepare()` with `%i`, `%s`, and `%d` placeholders (safe even under `NO_BACKSLASH_ESCAPES`).
+
 = 1.3.0 =
 * Renamed plugin to LibertyDev Site Migrator (`libertydev-site-migrator`) with `LDSM_` / `ldsm_` prefixing per WordPress.org Plugin Directory guidelines.
-* Hardened backup vault for Nginx and all web servers using a 128-bit secret vault directory inside `wp_upload_dir()`, `index.php` shields, and `<?php exit; __halt_compiler();` execution guards on all stored archives (`.zip.php`) as well as temporary state, manifest, index, and SQL dump files.
+* Hardened backup vault with a 128-bit secret vault directory inside `wp_upload_dir()`, `.htaccess`, `web.config`, and `index.php` directory barriers.
 * Added segment-by-segment anti-symlink (`is_link()`) and canonical `realpath()` boundary verification across all archive extraction and file restore paths.
 * Replaced hardcoded `WP_CONTENT_DIR` assumptions with dynamic WordPress directory resolution (`wp_upload_dir()`, `WP_PLUGIN_DIR`, `WPMU_PLUGIN_DIR`, `get_theme_root()`, `WP_LANG_DIR`).
 * Enforced immediate recursive input sanitization across all `$_POST` and `$_FILES` AJAX payloads and removed promotional signatures from scheduled notification emails.
@@ -89,5 +98,5 @@ Yes. Backups are stored inside your WordPress uploads directory under a cryptogr
 
 == Upgrade Notice ==
 
-= 1.3.0 =
-Security & compatibility upgrade: Nginx-hardened uploads vault, anti-symlink extraction guards, relocated WordPress directory support, and official LibertyDev Site Migrator slug.
+= 1.4.0 =
+Security & WordPress.org compliance release: database-stored job state with non-executable protected vault data files, Multisite Super Admin enforcement, and 100% `$wpdb->prepare()` SQL parameterization.

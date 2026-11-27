@@ -1,17 +1,16 @@
 <?php
 /**
- * Hardened Uploads Vault, Canonical Directory Resolver & Symlink Guard — LibertyDev Site Migrator.
+ * Protected Uploads Vault, Multisite Capability Gate, Canonical Directory Resolver & Symlink Guard.
  *
  * Security Architecture:
- * 1. Stores all plugin-created files under wp_upload_dir()['basedir'] . '/libertydev-site-migrator/'
- *    inside a cryptographically unguessable 128-bit secret vault subdirectory (vault-{32_hex}) with
- *    index.php directory-listing shields in every level so Nginx (which ignores .htaccess) cannot
- *    enumerate or guess backup/job URLs.
- * 2. Every stored archive (.zip.php) and temporary state, manifest, index, metadata, and SQL dump file
- *    on disk is written with a .php extension prefixed at byte 0 with "<?php exit; __halt_compiler();\n"
- *    so direct HTTP requests on Nginx/Apache/IIS halt PHP compilation and exit with zero bytes output.
- * 3. Every extraction/copy destination is validated segment-by-segment with is_link() + realpath()
- *    confinement to block symlink-following directory traversal attacks.
+ * 1. Enforces Super Admin (manage_network_options) on WordPress Multisite and Administrator (manage_options)
+ *    on single-site installs so subsite admins on Multisite cannot modify shared network plugins/themes/mu-plugins.
+ * 2. Stores transient migration job state inside the WordPress database (non-autoloaded options) rather than
+ *    executable files on disk, and stores backup archives & large streaming work files as strictly non-executable
+ *    protected data files (.zip, .json, .dat, .sql) inside a cryptographically unguessable 128-bit vault under
+ *    wp_upload_dir()['basedir'] . '/libertydev-site-migrator/vault-{32_hex}/' shielded with .htaccess, web.config,
+ *    and index.html directory-listing barriers (zero .php files are ever written inside uploads).
+ * 3. Every extraction/copy destination is validated segment-by-segment with is_link() + realpath() confinement.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -21,11 +20,31 @@ if ( ! defined( 'ABSPATH' ) ) {
 class LDSM_Storage {
 
 	/**
-	 * 31-byte PHP execution & lexer-halt guard prepended to all vault archives and temporary files on disk.
-	 * Stopping the Zend lexer via __halt_compiler() guarantees PHP never parses trailing binary ZIP or SQL bytes.
+	 * Option key tracking active migration job IDs for reliable cleanup.
 	 */
-	const PHP_EXIT_GUARD     = "<?php exit; __halt_compiler();\n";
-	const PHP_EXIT_GUARD_LEN = 31;
+	const JOB_INDEX_OPTION = 'ldsm_active_jobs';
+
+	/**
+	 * Return the minimum WordPress capability required to operate migrations or backups.
+	 * On Multisite, only Network Super Admins can modify shared plugins, themes, mu-plugins, or network tables.
+	 *
+	 * @return string
+	 */
+	public static function get_required_capability() {
+		return is_multisite() ? 'manage_network_options' : 'manage_options';
+	}
+
+	/**
+	 * Check whether the current authenticated user is authorized to manage migrations and backups.
+	 *
+	 * @return bool
+	 */
+	public static function current_user_can_manage() {
+		if ( is_multisite() ) {
+			return is_super_admin() && current_user_can( 'manage_network_options' );
+		}
+		return current_user_can( 'manage_options' );
+	}
 
 	/**
 	 * Normalize path slashes to forward slashes without trailing slash.
@@ -210,9 +229,9 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Resolve on-disk path for a logical backup filename (prefers Nginx-guarded .zip.php, falls back to legacy .zip).
+	 * Resolve on-disk path for a stored backup archive inside the protected vault.
 	 *
-	 * @param string $filename Logical archive filename ending with .zip.
+	 * @param string $filename Archive filename ending with .zip.
 	 * @return string Absolute on-disk path or empty string if not found/invalid.
 	 */
 	public static function resolve_backup_disk_path( $filename ) {
@@ -223,48 +242,11 @@ class LDSM_Storage {
 		if ( '' === $dir ) {
 			return '';
 		}
-		$guarded = $dir . '/' . $filename . '.php';
-		if ( is_file( $guarded ) && ! is_link( $guarded ) ) {
-			return $guarded;
-		}
-		$legacy = $dir . '/' . $filename;
-		if ( is_file( $legacy ) && ! is_link( $legacy ) ) {
-			return $legacy;
+		$path = $dir . '/' . $filename;
+		if ( is_file( $path ) && ! is_link( $path ) ) {
+			return $path;
 		}
 		return '';
-	}
-
-	/**
-	 * Detect leading PHP guard header length on a vault file (0 if raw unguarded ZIP/data).
-	 *
-	 * @param string $filepath Absolute file path.
-	 * @return int Leading guard byte count.
-	 */
-	public static function detect_php_guard_length( $filepath ) {
-		if ( ! is_file( $filepath ) || is_link( $filepath ) || ! is_readable( $filepath ) ) {
-			return 0;
-		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Peeking first 64 bytes to detect PHP guard preamble.
-		$fp = @fopen( $filepath, 'rb' );
-		if ( ! $fp ) {
-			return 0;
-		}
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread
-		$head = fread( $fp, 64 );
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-		fclose( $fp );
-
-		if ( ! is_string( $head ) || '' === $head ) {
-			return 0;
-		}
-		if ( 0 === strpos( $head, self::PHP_EXIT_GUARD ) ) {
-			return self::PHP_EXIT_GUARD_LEN;
-		}
-		if ( 0 === strpos( $head, '<?php' ) ) {
-			$nl = strpos( $head, "\n" );
-			return ( false !== $nl ) ? ( $nl + 1 ) : 0;
-		}
-		return 0;
 	}
 
 	/**
@@ -302,18 +284,15 @@ class LDSM_Storage {
 		$webconfig_xml  = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 		$webconfig_xml .= "<configuration><system.webServer><authorization><deny users=\"*\" /></authorization></system.webServer></configuration>\n";
 
-		foreach ( array( $outer_dir, $backups_dir ) as $sec_dir ) {
+		foreach ( array( $outer_dir, $backups_dir, $jobs_dir ) as $sec_dir ) {
 			if ( ! file_exists( $sec_dir . '/.htaccess' ) ) {
 				@file_put_contents( $sec_dir . '/.htaccess', $htaccess_rules );
 			}
 			if ( ! file_exists( $sec_dir . '/web.config' ) ) {
 				@file_put_contents( $sec_dir . '/web.config', $webconfig_xml );
 			}
-		}
-
-		foreach ( array( $outer_dir, $backups_dir, $jobs_dir ) as $idx_dir ) {
-			if ( ! file_exists( $idx_dir . '/index.php' ) ) {
-				@file_put_contents( $idx_dir . '/index.php', "<?php\n// Silence is golden.\n" );
+			if ( ! file_exists( $sec_dir . '/index.html' ) ) {
+				@file_put_contents( $sec_dir . '/index.html', '' );
 			}
 		}
 
@@ -321,29 +300,13 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Initialize a PHP-exit-guarded file on disk so direct HTTP requests on Nginx halt compilation and output zero bytes.
+	 * Write a non-executable JSON metadata file atomically inside the protected vault.
 	 *
-	 * @param string $filepath Target .php file path.
-	 * @return bool
-	 */
-	public static function ensure_guarded_php_file( $filepath ) {
-		if ( is_link( $filepath ) ) {
-			return false;
-		}
-		if ( ! file_exists( $filepath ) || 0 === (int) @filesize( $filepath ) ) {
-			return false !== @file_put_contents( $filepath, self::PHP_EXIT_GUARD, LOCK_EX );
-		}
-		return true;
-	}
-
-	/**
-	 * Write a JSON payload into a PHP-exit-guarded .php file atomically.
-	 *
-	 * @param string $filepath Target .php file path.
+	 * @param string $filepath Target .json file path.
 	 * @param array  $data     Array to encode as JSON.
 	 * @return bool
 	 */
-	public static function write_guarded_json_file( $filepath, array $data ) {
+	public static function write_json_file( $filepath, array $data ) {
 		if ( is_link( $filepath ) ) {
 			return false;
 		}
@@ -351,10 +314,9 @@ class LDSM_Storage {
 		if ( false === $json ) {
 			return false;
 		}
-		$payload = self::PHP_EXIT_GUARD . $json;
-		$tmp     = $filepath . '.tmp.' . wp_rand( 1000, 999999 ) . '.php';
+		$tmp = $filepath . '.tmp.' . wp_rand( 1000, 999999 );
 
-		if ( false === @file_put_contents( $tmp, $payload, LOCK_EX ) ) {
+		if ( false === @file_put_contents( $tmp, $json, LOCK_EX ) ) {
 			return false;
 		}
 		if ( ! self::move_file( $tmp, $filepath ) ) {
@@ -365,24 +327,18 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Read and decode a PHP-exit-guarded .php JSON file.
+	 * Read and decode a non-executable JSON metadata file from the protected vault.
 	 *
-	 * @param string $filepath Source .php file path.
+	 * @param string $filepath Source .json file path.
 	 * @return array|null
 	 */
-	public static function read_guarded_json_file( $filepath ) {
+	public static function read_json_file( $filepath ) {
 		if ( ! is_file( $filepath ) || is_link( $filepath ) || ! is_readable( $filepath ) ) {
 			return null;
 		}
 		$raw = @file_get_contents( $filepath );
 		if ( false === $raw ) {
 			return null;
-		}
-		if ( 0 === strpos( $raw, self::PHP_EXIT_GUARD ) ) {
-			$raw = substr( $raw, self::PHP_EXIT_GUARD_LEN );
-		} elseif ( 0 === strpos( $raw, '<?php' ) ) {
-			$nl  = strpos( $raw, "\n" );
-			$raw = ( false !== $nl ) ? substr( $raw, $nl + 1 ) : '';
 		}
 		$decoded = json_decode( trim( $raw ), true );
 		return is_array( $decoded ) ? $decoded : null;
@@ -465,7 +421,7 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Create a fresh job workspace directory with an unguessable 128-bit ID and index.php shield.
+	 * Create a fresh job workspace directory with an unguessable 128-bit ID and directory shields.
 	 *
 	 * @param string $prefix Job prefix ('exp', 'bak', 'sch', or 'imp').
 	 * @return array{job_id:string,job_dir:string}|WP_Error
@@ -489,7 +445,7 @@ class LDSM_Storage {
 			return new WP_Error( 'job_dir_failed', 'Could not create temporary job workspace directory.' );
 		}
 
-		@file_put_contents( $job_dir . '/index.php', "<?php\n// Silence is golden.\n" );
+		@file_put_contents( $job_dir . '/index.html', '' );
 
 		return array(
 			'job_id'  => $job_id,
@@ -519,7 +475,7 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Atomically persist job state inside PHP-exit-guarded state.php.
+	 * Persist job state in the WordPress database (non-autoloaded option) rather than an executable file on disk.
 	 *
 	 * @param string $job_id Job ID.
 	 * @param array  $state  State payload.
@@ -531,11 +487,26 @@ class LDSM_Storage {
 			return false;
 		}
 		$state['updated_at'] = time();
-		return self::write_guarded_json_file( $dir . '/state.php', $state );
+		$opt_key             = 'ldsm_job_' . $job_id;
+		$saved               = update_option( $opt_key, $state, false );
+
+		// update_option() returns false when value is unchanged; verify presence.
+		if ( ! $saved && ! is_array( get_option( $opt_key, null ) ) ) {
+			return false;
+		}
+
+		$index = get_option( self::JOB_INDEX_OPTION, array() );
+		if ( ! is_array( $index ) ) {
+			$index = array();
+		}
+		$index[ $job_id ] = $state['updated_at'];
+		update_option( self::JOB_INDEX_OPTION, $index, false );
+
+		return true;
 	}
 
 	/**
-	 * Load job state from PHP-exit-guarded state.php.
+	 * Load job state from the WordPress database.
 	 *
 	 * @param string $job_id Job ID.
 	 * @return array|WP_Error
@@ -545,15 +516,15 @@ class LDSM_Storage {
 		if ( is_wp_error( $dir ) ) {
 			return $dir;
 		}
-		$decoded = self::read_guarded_json_file( $dir . '/state.php' );
-		if ( ! is_array( $decoded ) ) {
-			return new WP_Error( 'state_missing_or_corrupt', 'Migration job state is missing or unreadable.' );
+		$state = get_option( 'ldsm_job_' . $job_id, null );
+		if ( ! is_array( $state ) ) {
+			return new WP_Error( 'state_missing_or_corrupt', 'Migration job state is missing or expired.' );
 		}
-		return $decoded;
+		return $state;
 	}
 
 	/**
-	 * Delete a job workspace recursively.
+	 * Delete a job workspace recursively and remove its state option from the database.
 	 *
 	 * @param string $job_id Job ID.
 	 */
@@ -561,6 +532,14 @@ class LDSM_Storage {
 		if ( ! self::is_valid_job_id( $job_id ) ) {
 			return;
 		}
+		delete_option( 'ldsm_job_' . $job_id );
+
+		$index = get_option( self::JOB_INDEX_OPTION, array() );
+		if ( is_array( $index ) && isset( $index[ $job_id ] ) ) {
+			unset( $index[ $job_id ] );
+			update_option( self::JOB_INDEX_OPTION, $index, false );
+		}
+
 		$jobs_root = self::get_jobs_root();
 		if ( '' === $jobs_root ) {
 			return;
@@ -572,26 +551,43 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Clean up abandoned job directories and orphan .part files older than 24 hours.
+	 * Clean up abandoned job directories, stale DB job state options, and orphan .part files older than 24 hours.
 	 */
 	public static function cleanup_stale_jobs() {
 		$cutoff   = time() - DAY_IN_SECONDS;
 		$jobs_dir = self::get_jobs_root();
 		$vault    = self::get_backups_dir();
 
+		$index = get_option( self::JOB_INDEX_OPTION, array() );
+		if ( is_array( $index ) && ! empty( $index ) ) {
+			$dirty = false;
+			foreach ( $index as $jid => $ts ) {
+				if ( (int) $ts < $cutoff ) {
+					delete_option( 'ldsm_job_' . $jid );
+					unset( $index[ $jid ] );
+					$dirty = true;
+					if ( '' !== $jobs_dir && self::is_valid_job_id( (string) $jid ) ) {
+						self::delete_dir_recursive( $jobs_dir . '/' . $jid );
+					}
+				}
+			}
+			if ( $dirty ) {
+				update_option( self::JOB_INDEX_OPTION, $index, false );
+			}
+		}
+
 		if ( '' !== $jobs_dir && is_dir( $jobs_dir ) ) {
 			$items = @scandir( $jobs_dir );
 			if ( is_array( $items ) ) {
 				foreach ( $items as $item ) {
-					if ( '.' === $item || '..' === $item || 'index.php' === $item ) {
+					if ( '.' === $item || '..' === $item || 'index.php' === $item || 'index.html' === $item || '.htaccess' === $item || 'web.config' === $item ) {
 						continue;
 					}
 					$path = $jobs_dir . '/' . $item;
 					if ( is_dir( $path ) && ! is_link( $path ) ) {
-						$state_file = $path . '/state.php';
-						$mtime      = file_exists( $state_file ) ? (int) @filemtime( $state_file ) : (int) @filemtime( $path );
+						$mtime = (int) @filemtime( $path );
 						if ( $mtime > 0 && $mtime < $cutoff ) {
-							self::delete_dir_recursive( $path );
+							self::delete_job( $item );
 						}
 					}
 				}
@@ -599,15 +595,12 @@ class LDSM_Storage {
 		}
 
 		if ( '' !== $vault && is_dir( $vault ) ) {
-			$patterns = array( $vault . '/*.zip.part.php', $vault . '/*.zip.part' );
-			foreach ( $patterns as $pat ) {
-				$parts = glob( $pat );
-				if ( is_array( $parts ) ) {
-					foreach ( $parts as $part_file ) {
-						$mt = (int) @filemtime( $part_file );
-						if ( $mt > 0 && $mt < $cutoff ) {
-							wp_delete_file( $part_file );
-						}
+			$parts = glob( $vault . '/*.zip.part' );
+			if ( is_array( $parts ) ) {
+				foreach ( $parts as $part_file ) {
+					$mt = (int) @filemtime( $part_file );
+					if ( $mt > 0 && $mt < $cutoff ) {
+						wp_delete_file( $part_file );
 					}
 				}
 			}
@@ -615,10 +608,10 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Generate a cryptographically unguessable logical backup filename ending in .zip.
+	 * Generate a cryptographically unguessable backup filename ending in .zip.
 	 *
 	 * @param string $trigger 'export', 'manual', or 'scheduled'.
-	 * @return string Logical filename ending with .zip
+	 * @return string Filename ending with .zip
 	 */
 	public static function generate_backup_filename( $trigger = 'export' ) {
 		$host = wp_parse_url( home_url(), PHP_URL_HOST );
@@ -646,7 +639,7 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * List all stored archives inside the secret vault (guarded .zip.php and legacy .zip) sorted newest first.
+	 * List all stored .zip archives inside the protected secret vault sorted newest first.
 	 *
 	 * @return array<int,array<string,mixed>>
 	 */
@@ -656,42 +649,23 @@ class LDSM_Storage {
 			return array();
 		}
 
-		$guarded_files = glob( $dir . '/*.zip.php' );
-		$legacy_files  = glob( $dir . '/*.zip' );
-		$all_paths     = array();
-
-		if ( is_array( $guarded_files ) ) {
-			foreach ( $guarded_files as $gp ) {
-				$logical               = substr( basename( $gp ), 0, -4 );
-				$all_paths[ $logical ] = $gp;
-			}
-		}
-		if ( is_array( $legacy_files ) ) {
-			foreach ( $legacy_files as $lp ) {
-				$logical = basename( $lp );
-				if ( ! isset( $all_paths[ $logical ] ) ) {
-					$all_paths[ $logical ] = $lp;
-				}
-			}
-		}
-
-		if ( empty( $all_paths ) ) {
+		$files = glob( $dir . '/*.zip' );
+		if ( ! is_array( $files ) || empty( $files ) ) {
 			return array();
 		}
 
-		$is_admin_ctx = is_user_logged_in() && current_user_can( 'manage_options' );
+		$is_admin_ctx = is_user_logged_in() && self::current_user_can_manage();
 		$list         = array();
 
-		foreach ( $all_paths as $filename => $filepath ) {
+		foreach ( $files as $filepath ) {
+			$filename = basename( $filepath );
 			if ( is_link( $filepath ) || ! self::is_valid_backup_filename( $filename ) ) {
 				continue;
 			}
-			$disk_size = (float) @filesize( $filepath );
-			$guard_len = self::detect_php_guard_length( $filepath );
-			$size      = max( 0.0, $disk_size - $guard_len );
+			$size      = (float) @filesize( $filepath );
 			$mtime     = (int) @filemtime( $filepath );
-			$meta_file = $dir . '/' . substr( $filename, 0, -4 ) . '.meta.php';
-			$meta      = self::read_guarded_json_file( $meta_file );
+			$meta_file = $dir . '/' . substr( $filename, 0, -4 ) . '.meta.json';
+			$meta      = self::read_json_file( $meta_file );
 			if ( ! is_array( $meta ) ) {
 				$meta = array();
 			}
@@ -782,9 +756,9 @@ class LDSM_Storage {
 	}
 
 	/**
-	 * Delete a stored backup (.zip.php or legacy .zip) and its guarded sidecar .meta.php.
+	 * Delete a stored backup .zip and its sidecar .meta.json.
 	 *
-	 * @param string $filename Logical archive filename ending with .zip.
+	 * @param string $filename Archive filename ending with .zip.
 	 * @return bool|WP_Error
 	 */
 	public static function delete_backup( $filename ) {
@@ -796,24 +770,17 @@ class LDSM_Storage {
 			return new WP_Error( 'storage_unavailable', 'Uploads vault directory is unavailable.' );
 		}
 
-		$guarded = $dir . '/' . $filename . '.php';
-		$legacy  = $dir . '/' . $filename;
-
-		if ( ! file_exists( $guarded ) && ! file_exists( $legacy ) ) {
+		$filepath = $dir . '/' . $filename;
+		if ( ! file_exists( $filepath ) ) {
 			return new WP_Error( 'not_found', 'Backup archive does not exist.' );
 		}
 
-		$meta_file = $dir . '/' . substr( $filename, 0, -4 ) . '.meta.php';
+		$meta_file = $dir . '/' . substr( $filename, 0, -4 ) . '.meta.json';
 		if ( file_exists( $meta_file ) ) {
 			wp_delete_file( $meta_file );
 		}
-		if ( file_exists( $guarded ) ) {
-			wp_delete_file( $guarded );
-		}
-		if ( file_exists( $legacy ) ) {
-			wp_delete_file( $legacy );
-		}
-		if ( file_exists( $guarded ) || file_exists( $legacy ) ) {
+		wp_delete_file( $filepath );
+		if ( file_exists( $filepath ) ) {
 			return new WP_Error( 'delete_failed', 'Could not delete backup file from disk.' );
 		}
 		return true;

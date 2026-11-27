@@ -19,8 +19,10 @@
 - **Canonical Relocated Directory Support:** Resolves `wp_upload_dir()`, `WP_PLUGIN_DIR`, `WPMU_PLUGIN_DIR`, `get_theme_root()`, and `WP_LANG_DIR` dynamically—no hardcoded `wp-content` path assumptions.
 - **Pure-PHP Streaming PKZIP / ZIP64 Engine:** Zero dependency on PHP's `ext-zip` (`ZipArchive`), eliminating `ZipArchive::close()` hangs on multi-GB sites while producing 100% standard `.zip` archives with full UTF-8 filename support.
 
-### 2. Nginx-Hardened Vault & Automated Scheduled Backups
-- **Multi-Server Vault Security:** Stores backups under a cryptographically randomized 128-bit vault directory inside WordPress uploads (`uploads/libertydev-site-migrator/vault-{secret}/`), with `index.php` directory shields, `.htaccess` / `web.config`, `<?php exit; ?>` execution guards on all temporary job/SQL files, and segment-by-segment anti-symlink (`is_link()` + `realpath()`) extraction checks.
+### 2. Protected Uploads Vault, Multisite Security & Automated Backups
+- **Hardened Vault & Non-Executable Data Files:** Stores transient job state in non-autoloaded WordPress database options and stores archives/work files strictly as non-executable protected data files (`.zip`, `.meta.json`, `.dat`, `.sql`) inside a cryptographically randomized 128-bit vault under `wp_upload_dir()` (`uploads/libertydev-site-migrator/vault-{secret}/`) shielded with `.htaccess`, `web.config`, and `index.html`, plus segment-by-segment anti-symlink (`is_link()` + `realpath()`) extraction checks.
+- **Multisite Super Admin Enforcement:** Automatically requires `is_super_admin()` and `manage_network_options` on WordPress Multisite networks so subsite administrators cannot modify shared plugins, themes, or `mu-plugins`.
+- **100% `$wpdb->prepare()` Parameterized SQL:** All dynamic export, search-and-replace, table-rename, and cleanup queries use WordPress 6.2+ `%i`, `%s`, and `%d` prepared placeholders (safe even under `NO_BACKSLASH_ESCAPES`).
 - **Flexible Automated Scheduling:** Schedule recurring background backups **Every 6 Hours**, **Every 12 Hours**, **Daily**, **Weekly** (with preferred day of week), **Bi-Weekly**, or **Monthly** at your preferred local site time.
 - **Smart Retention Policy & Email Alerts:** Automatically prunes older scheduled backups beyond your retention limit (while keeping manual backups untouched) and sends optional completion/error email notifications.
 

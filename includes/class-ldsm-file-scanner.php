@@ -42,14 +42,14 @@ class LDSM_File_Scanner {
 	);
 
 	/**
-	 * Run a time-boxed scan step appending discovered files into PHP-exit-guarded $files_php.
+	 * Run a time-boxed scan step appending discovered files into protected non-executable data file $files_dat.
 	 *
 	 * @param array  $state     Job state array (modified by reference).
-	 * @param string $files_php Path to PHP-guarded files.php output list.
+	 * @param string $files_dat Path to protected files.dat output list.
 	 * @param float  $deadline  Unix microtime deadline for this tick.
 	 * @return bool|WP_Error True when scan is 100% complete, false when more directories remain, or WP_Error.
 	 */
-	public static function scan_step( array &$state, $files_php, $deadline ) {
+	public static function scan_step( array &$state, $files_dat, $deadline ) {
 		$roots   = LDSM_Storage::get_content_roots();
 		$options = isset( $state['options'] ) && is_array( $state['options'] ) ? $state['options'] : array();
 
@@ -76,18 +76,18 @@ class LDSM_File_Scanner {
 			$state['total_bytes'] = 0;
 		}
 
-		if ( ! LDSM_Storage::ensure_guarded_php_file( $files_php ) ) {
-			return new WP_Error( 'manifest_guard_failed', 'Could not initialize guarded file manifest.' );
+		if ( is_link( $files_dat ) ) {
+			return new WP_Error( 'manifest_symlink_blocked', 'Refusing to write scan manifest through symbolic link.' );
 		}
 
 		$allowed_themes  = $exclude_themes ? self::get_active_theme_slugs() : array();
 		$allowed_plugins = $exclude_plugins ? self::get_active_plugin_roots() : array();
 		$own_vault_outer = LDSM_Storage::get_outer_uploads_folder();
 
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming append to guarded manifest across ticks.
-		$out = @fopen( $files_php, 'ab' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming append to protected non-executable manifest data file across ticks.
+		$out = @fopen( $files_dat, 'ab' );
 		if ( ! $out ) {
-			return new WP_Error( 'manifest_open_failed', 'Could not open guarded files manifest for writing.' );
+			return new WP_Error( 'manifest_open_failed', 'Could not open protected files manifest for writing.' );
 		}
 
 		$buffer = '';

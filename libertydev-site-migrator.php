@@ -3,7 +3,7 @@
  * Plugin Name:       LibertyDev Site Migrator
  * Plugin URI:        https://thelibertydev.com/open-source
  * Description:       Site migration, manual backup, and automated scheduled backup solution by LibertyDev. Unlimited-size streaming ZIP export/import with serialization-safe domain & path replacement.
- * Version:           1.3.0
+ * Version:           1.4.0
  * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            LibertyDev
@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'LDSM_VERSION', '1.3.0' );
+define( 'LDSM_VERSION', '1.4.0' );
 define( 'LDSM_PLUGIN_FILE', __FILE__ );
 define( 'LDSM_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 define( 'LDSM_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
@@ -113,7 +113,7 @@ final class LibertyDev_Site_Migrator {
 		add_menu_page(
 			$strings['plugin_title'],
 			$strings['menu_title'],
-			'manage_options',
+			LDSM_Storage::get_required_capability(),
 			'libertydev-site-migrator',
 			array( $this, 'render_admin_page' ),
 			$icon_data_uri,
@@ -122,12 +122,15 @@ final class LibertyDev_Site_Migrator {
 	}
 
 	/**
-	 * Add quick dashboard link in Plugins list.
+	 * Add quick dashboard link in Plugins list for authorized administrators / network super admins.
 	 *
 	 * @param array $links Existing links.
 	 * @return array
 	 */
 	public function add_plugin_action_links( $links ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return $links;
+		}
 		$lang    = LDSM_I18n::get_active_lang();
 		$strings = LDSM_I18n::get_strings( $lang );
 		$url     = admin_url( 'admin.php?page=libertydev-site-migrator' );
@@ -213,7 +216,7 @@ final class LibertyDev_Site_Migrator {
 	 * Render the admin UI template.
 	 */
 	public function render_admin_page() {
-		if ( ! current_user_can( 'manage_options' ) ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
 			wp_die( esc_html__( 'You do not have sufficient permissions to access this page.', 'libertydev-site-migrator' ) );
 		}
 		include LDSM_PLUGIN_DIR . 'templates/admin-page.php';
@@ -224,7 +227,7 @@ final class LibertyDev_Site_Migrator {
 	 * Contains zero external links or credits (Guideline 10 compliant).
 	 */
 	public function maybe_render_maintenance_mode() {
-		if ( is_user_logged_in() && current_user_can( 'manage_options' ) ) {
+		if ( is_user_logged_in() && LDSM_Storage::current_user_can_manage() ) {
 			return;
 		}
 		$ts = (int) get_option( 'ldsm_maintenance_active', 0 );

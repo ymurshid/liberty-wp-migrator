@@ -3,7 +3,8 @@
  * Export & Backup State-Machine Coordinator — LibertyDev Site Migrator.
  *
  * Powers interactive Exports, 1-click Manual Backups, and chunked Background Scheduled Backups
- * using canonical WordPress directory resolution and PHP-exit-guarded temporary files.
+ * using canonical WordPress directory resolution, database-stored job state, and non-executable
+ * protected work/archive data files inside the unguessable uploads vault.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -80,7 +81,7 @@ class LDSM_Exporter {
 			'total_bytes'        => 0,
 			'files_archived'     => 0,
 			'bytes_archived'     => 0,
-			'files_php_offset'   => 0,
+			'files_dat_offset'   => 0,
 			'current_file_entry' => null,
 			'partial_file'       => null,
 			'zip_offset'         => 0,
@@ -129,8 +130,8 @@ class LDSM_Exporter {
 
 		// Phase 1: Scan configured WordPress content roots (plugins, mu-plugins, themes, uploads, languages).
 		if ( 'scan_files' === $phase ) {
-			$files_php = $job_dir . '/files.php';
-			$done_scan = LDSM_File_Scanner::scan_step( $state, $files_php, $deadline );
+			$files_dat = $job_dir . '/files.dat';
+			$done_scan = LDSM_File_Scanner::scan_step( $state, $files_dat, $deadline );
 			if ( is_wp_error( $done_scan ) ) {
 				self::abort_export_files( $state );
 				LDSM_Storage::delete_job( $job_id );
@@ -154,9 +155,9 @@ class LDSM_Exporter {
 			);
 		}
 
-		// Phase 2: Export Database tables & views into PHP-exit-guarded database.sql.php.
+		// Phase 2: Export Database tables & views into protected non-executable database.sql.
 		if ( 'export_db' === $phase ) {
-			$sql_php  = $job_dir . '/database.sql.php';
+			$sql_file = $job_dir . '/database.sql';
 			$replacer = null;
 			if ( ! empty( $state['options']['custom_replaces'] ) ) {
 				$raw_map = array();
@@ -166,7 +167,7 @@ class LDSM_Exporter {
 				$replacer = new LDSM_Replacer( $raw_map );
 			}
 
-			$done_db = LDSM_DB_Exporter::export_step( $state, $sql_php, $deadline, $replacer );
+			$done_db = LDSM_DB_Exporter::export_step( $state, $sql_file, $deadline, $replacer );
 			if ( is_wp_error( $done_db ) ) {
 				self::abort_export_files( $state );
 				LDSM_Storage::delete_job( $job_id );
@@ -225,33 +226,33 @@ class LDSM_Exporter {
 			);
 		}
 
-		// Phase 4: Write Central Directory & EOCD, move guarded .zip.php archive into secret vault, write guarded .meta.php, clean job dir.
+		// Phase 4: Write Central Directory & EOCD, move .zip archive into protected vault, write .meta.json, clean job dir.
 		if ( 'finalize_zip' === $phase ) {
-			$backups_dir     = LDSM_Storage::get_backups_dir();
-			$zip_part        = $job_dir . '/archive.zip.part.php';
-			$final_disk_path = $backups_dir . '/' . $state['backup_filename'] . '.php';
-			$cd_php          = $job_dir . '/central_dir.php';
+			$backups_dir = LDSM_Storage::get_backups_dir();
+			$zip_part    = $job_dir . '/archive.zip.part';
+			$final_zip   = $backups_dir . '/' . $state['backup_filename'];
+			$cd_dat      = $job_dir . '/central_dir.dat';
 
-			$fin = LDSM_Stream_Zip_Writer::finalize_archive( $zip_part, $cd_php, $state['zip_offset'] );
+			$fin = LDSM_Stream_Zip_Writer::finalize_archive( $zip_part, $cd_dat, $state['zip_offset'] );
 			if ( is_wp_error( $fin ) ) {
 				self::abort_export_files( $state );
 				LDSM_Storage::delete_job( $job_id );
 				return $fin;
 			}
 
-			if ( ! LDSM_Storage::move_file( $zip_part, $final_disk_path ) ) {
+			if ( ! LDSM_Storage::move_file( $zip_part, $final_zip ) ) {
 				wp_delete_file( $zip_part );
 				LDSM_Storage::delete_job( $job_id );
 				return new WP_Error( 'zip_move_failed', 'Failed moving finalized archive into backups vault.' );
 			}
 
-			$meta_php = $backups_dir . '/' . substr( $state['backup_filename'], 0, -4 ) . '.meta.php';
+			$meta_json = $backups_dir . '/' . substr( $state['backup_filename'], 0, -4 ) . '.meta.json';
 			if ( ! empty( $state['manifest_summary'] ) && is_array( $state['manifest_summary'] ) ) {
-				LDSM_Storage::write_guarded_json_file( $meta_php, $state['manifest_summary'] );
+				LDSM_Storage::write_json_file( $meta_json, $state['manifest_summary'] );
 			}
 
-			clearstatcache( true, $final_disk_path );
-			$final_size = max( 0.0, (float) @filesize( $final_disk_path ) - LDSM_Storage::PHP_EXIT_GUARD_LEN );
+			clearstatcache( true, $final_zip );
+			$final_size = (float) @filesize( $final_zip );
 			$trigger    = isset( $state['trigger'] ) ? (string) $state['trigger'] : 'export';
 
 			LDSM_Storage::delete_job( $job_id );
@@ -262,7 +263,7 @@ class LDSM_Exporter {
 			}
 
 			$download_url = '';
-			if ( is_user_logged_in() && current_user_can( 'manage_options' ) ) {
+			if ( is_user_logged_in() && LDSM_Storage::current_user_can_manage() ) {
 				$download_url = add_query_arg(
 					array(
 						'action'   => 'ldsm_download_backup',
@@ -301,8 +302,8 @@ class LDSM_Exporter {
 	private static function archive_step( $job_dir, array &$state, $deadline ) {
 		global $wpdb;
 
-		$zip_part = $job_dir . '/archive.zip.part.php';
-		$cd_php   = $job_dir . '/central_dir.php';
+		$zip_part = $job_dir . '/archive.zip.part';
+		$cd_dat   = $job_dir . '/central_dir.dat';
 		$roots    = LDSM_Storage::get_content_roots();
 
 		if ( empty( $state['manifest_written'] ) ) {
@@ -347,7 +348,7 @@ class LDSM_Exporter {
 			$manifest_json = wp_json_encode( $manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
 			$m_res         = LDSM_Stream_Zip_Writer::add_from_string(
 				$zip_part,
-				$cd_php,
+				$cd_dat,
 				$state['zip_offset'],
 				'manifest.json',
 				(string) $manifest_json
@@ -374,16 +375,15 @@ class LDSM_Exporter {
 		}
 
 		if ( empty( $state['db_archived'] ) ) {
-			$sql_php = $job_dir . '/database.sql.php';
-			$db_res  = LDSM_Stream_Zip_Writer::add_file_chunked(
+			$sql_file = $job_dir . '/database.sql';
+			$db_res   = LDSM_Stream_Zip_Writer::add_file_chunked(
 				$zip_part,
-				$cd_php,
+				$cd_dat,
 				$state['zip_offset'],
-				$sql_php,
+				$sql_file,
 				'database/database.sql',
 				$state['partial_file'],
-				$deadline,
-				LDSM_Storage::PHP_EXIT_GUARD_LEN
+				$deadline
 			);
 			if ( is_wp_error( $db_res ) ) {
 				return $db_res;
@@ -393,7 +393,7 @@ class LDSM_Exporter {
 			}
 
 			$state['db_archived'] = true;
-			wp_delete_file( $sql_php );
+			wp_delete_file( $sql_file );
 
 			if ( microtime( true ) >= $deadline ) {
 				return false;
@@ -409,7 +409,7 @@ class LDSM_Exporter {
 			if ( '' !== $src_abs ) {
 				$p_res = LDSM_Stream_Zip_Writer::add_file_chunked(
 					$zip_part,
-					$cd_php,
+					$cd_dat,
 					$state['zip_offset'],
 					$src_abs,
 					(string) $curr['rel'],
@@ -433,41 +433,41 @@ class LDSM_Exporter {
 			}
 		}
 
-		$files_php = $job_dir . '/files.php';
-		if ( ! file_exists( $files_php ) ) {
+		$files_dat = $job_dir . '/files.dat';
+		if ( ! file_exists( $files_dat ) ) {
 			return true;
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming byte-offset file list cursor across ticks.
-		$fp = @fopen( $files_php, 'rb' );
+		$fp = @fopen( $files_dat, 'rb' );
 		if ( ! $fp ) {
-			return new WP_Error( 'files_list_unreadable', 'Cannot open guarded files manifest during archive step.' );
+			return new WP_Error( 'files_list_unreadable', 'Cannot open protected files manifest during archive step.' );
 		}
 
-		if ( 0 !== @fseek( $fp, (int) $state['files_php_offset'], SEEK_SET ) ) {
+		if ( 0 !== @fseek( $fp, (int) $state['files_dat_offset'], SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
-			return new WP_Error( 'files_list_seek_failed', 'Failed seeking in guarded files manifest.' );
+			return new WP_Error( 'files_list_seek_failed', 'Failed seeking in protected files manifest.' );
 		}
 
 		while ( ( $line = fgets( $fp ) ) !== false ) {
 			$next_line_offset = (int) ftell( $fp );
 			$trimmed          = trim( $line );
-			if ( '' === $trimmed || 0 === strpos( $trimmed, '<?php' ) ) {
-				$state['files_php_offset'] = $next_line_offset;
+			if ( '' === $trimmed ) {
+				$state['files_dat_offset'] = $next_line_offset;
 				continue;
 			}
 
 			$entry = json_decode( $trimmed, true );
 			if ( ! is_array( $entry ) || empty( $entry['rel'] ) || empty( $entry['root'] ) || ! isset( $entry['sub'] ) ) {
-				$state['files_php_offset'] = $next_line_offset;
+				$state['files_dat_offset'] = $next_line_offset;
 				continue;
 			}
 
 			$root_key = (string) $entry['root'];
 			$sub_path = (string) $entry['sub'];
 			if ( ! isset( $roots[ $root_key ] ) || '' === $sub_path ) {
-				$state['files_php_offset'] = $next_line_offset;
+				$state['files_dat_offset'] = $next_line_offset;
 				$state['files_archived']  += 1;
 				continue;
 			}
@@ -476,7 +476,7 @@ class LDSM_Exporter {
 
 			$f_res = LDSM_Stream_Zip_Writer::add_file_chunked(
 				$zip_part,
-				$cd_php,
+				$cd_dat,
 				$state['zip_offset'],
 				$src_abs,
 				(string) $entry['rel'],
@@ -490,7 +490,7 @@ class LDSM_Exporter {
 				return $f_res;
 			}
 
-			$state['files_php_offset'] = $next_line_offset;
+			$state['files_dat_offset'] = $next_line_offset;
 
 			if ( false === $f_res ) {
 				$state['current_file_entry'] = $entry;
@@ -510,7 +510,7 @@ class LDSM_Exporter {
 		}
 
 		$is_eof                    = feof( $fp );
-		$state['files_php_offset'] = (int) ftell( $fp );
+		$state['files_dat_offset'] = (int) ftell( $fp );
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		fclose( $fp );
 
@@ -525,22 +525,16 @@ class LDSM_Exporter {
 	public static function abort_export_files( array $state ) {
 		if ( ! empty( $state['job_id'] ) ) {
 			$jdir = LDSM_Storage::get_job_dir( (string) $state['job_id'] );
-			if ( ! is_wp_error( $jdir ) ) {
-				foreach ( array( 'archive.zip.part.php', 'archive.zip.part' ) as $part_name ) {
-					if ( file_exists( $jdir . '/' . $part_name ) ) {
-						wp_delete_file( $jdir . '/' . $part_name );
-					}
-				}
+			if ( ! is_wp_error( $jdir ) && file_exists( $jdir . '/archive.zip.part' ) ) {
+				wp_delete_file( $jdir . '/archive.zip.part' );
 			}
 		}
 		if ( ! empty( $state['backup_filename'] ) ) {
 			$bdir = LDSM_Storage::get_backups_dir();
 			if ( '' !== $bdir ) {
-				foreach ( array( '.part.php', '.part' ) as $suffix ) {
-					$part = $bdir . '/' . $state['backup_filename'] . $suffix;
-					if ( file_exists( $part ) ) {
-						wp_delete_file( $part );
-					}
+				$part = $bdir . '/' . $state['backup_filename'] . '.part';
+				if ( file_exists( $part ) ) {
+					wp_delete_file( $part );
 				}
 			}
 		}

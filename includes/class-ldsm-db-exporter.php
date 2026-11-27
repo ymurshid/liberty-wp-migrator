@@ -2,8 +2,8 @@
 /**
  * Time-Boxed Chunked MySQL / MariaDB Database Exporter — LibertyDev Site Migrator.
  *
- * Writes SQL statements into a PHP-exit-guarded database.sql.php temporary file on disk so
- * direct HTTP requests on Nginx/Apache/IIS execute exit immediately and return zero bytes.
+ * Writes framed SQL statements into a non-executable protected data file (database.sql)
+ * inside the unguessable uploads vault and uses $wpdb->prepare() across all queries.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -17,6 +17,9 @@ class LDSM_DB_Exporter {
 
 	/**
 	 * Initialize database export list of tables and views into $state.
+	 *
+	 * @param array $state Job state (modified by reference).
+	 * @return true|WP_Error
 	 */
 	public static function init_tables_list( array &$state ) {
 		global $wpdb;
@@ -74,9 +77,15 @@ class LDSM_DB_Exporter {
 	}
 
 	/**
-	 * Run a time-boxed database export step writing to PHP-exit-guarded $sql_php_filepath.
+	 * Run a time-boxed database export step writing to protected data file $sql_filepath.
+	 *
+	 * @param array              $state        Job state (modified by reference).
+	 * @param string             $sql_filepath Target protected database.sql path.
+	 * @param float              $deadline     Unix microtime deadline.
+	 * @param LDSM_Replacer|null $replacer     Optional custom search/replace transformer.
+	 * @return bool|WP_Error
 	 */
-	public static function export_step( array &$state, $sql_php_filepath, $deadline, $replacer = null ) {
+	public static function export_step( array &$state, $sql_filepath, $deadline, $replacer = null ) {
 		global $wpdb;
 
 		if ( ! isset( $state['db_tables'] ) ) {
@@ -86,16 +95,15 @@ class LDSM_DB_Exporter {
 			}
 		}
 
-		$is_new_file = ! file_exists( $sql_php_filepath ) || 0 === (int) @filesize( $sql_php_filepath );
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming SQL dump across time-boxed ticks.
-		$fp = @fopen( $sql_php_filepath, 'ab' );
+		$is_new_file = ! file_exists( $sql_filepath ) || 0 === (int) @filesize( $sql_filepath );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming SQL dump into protected non-executable data file across ticks.
+		$fp = @fopen( $sql_filepath, 'ab' );
 		if ( ! $fp ) {
 			return new WP_Error( 'sql_open_failed', 'Cannot open temporary SQL dump file for writing.' );
 		}
 
 		if ( $is_new_file ) {
-			$header  = LDSM_Storage::PHP_EXIT_GUARD;
-			$header .= "-- LibertyDev Site Migrator SQL Dump\n";
+			$header  = "-- LibertyDev Site Migrator SQL Dump\n";
 			$header .= '-- Generated: ' . gmdate( 'Y-m-d H:i:s' ) . " UTC\n";
 			$header .= '-- Source URL: ' . home_url() . "\n";
 			$header .= "SET NAMES utf8mb4;\n";
@@ -105,7 +113,7 @@ class LDSM_DB_Exporter {
 			if ( false === fwrite( $fp, $header ) ) {
 				// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 				fclose( $fp );
-				return new WP_Error( 'sql_write_failed', 'Failed writing guarded SQL header.' );
+				return new WP_Error( 'sql_write_failed', 'Failed writing SQL dump header.' );
 			}
 		}
 
@@ -135,31 +143,42 @@ class LDSM_DB_Exporter {
 				);
 			}
 
-			$cursor    = &$state['db_table_cursor'];
-			$pk_col    = $cursor['pk_col'];
-			$col_meta  = $cursor['col_meta'];
-			$where     = self::build_table_filter_clause( $has_prefix ? $suffix : '', $options );
-			$esc_table = self::quote_ident( $table_name );
+			$cursor   = &$state['db_table_cursor'];
+			$pk_col   = $cursor['pk_col'];
+			$col_meta = $cursor['col_meta'];
+			$filter   = self::build_table_filter_clause( $has_prefix ? $suffix : '', $options );
+
+			$where_parts  = array();
+			$prepare_args = array( $table_name );
 
 			if ( null !== $pk_col ) {
-				$esc_pk = self::quote_ident( $pk_col );
-				$conds  = array();
 				if ( null !== $cursor['last_pk'] ) {
-					$conds[] = $esc_pk . ' > ' . (int) $cursor['last_pk'];
+					$where_parts[]  = '%i > %d';
+					$prepare_args[] = $pk_col;
+					$prepare_args[] = (int) $cursor['last_pk'];
 				}
-				if ( '' !== $where ) {
-					$conds[] = '(' . $where . ')';
+				if ( '' !== $filter['sql'] ) {
+					$where_parts[] = '(' . $filter['sql'] . ')';
+					$prepare_args  = array_merge( $prepare_args, $filter['args'] );
 				}
-				$where_sql = ! empty( $conds ) ? ( 'WHERE ' . implode( ' AND ', $conds ) ) : '';
-				$query     = "SELECT * FROM {$esc_table} {$where_sql} ORDER BY {$esc_pk} ASC LIMIT " . self::SELECT_BATCH_SIZE;
-			} else {
-				$where_sql = '' !== $where ? ( 'WHERE ' . $where ) : '';
-				$offset    = (int) $cursor['offset'];
-				$query     = "SELECT * FROM {$esc_table} {$where_sql} LIMIT {$offset}, " . self::SELECT_BATCH_SIZE;
-			}
+				$where_sql      = ! empty( $where_parts ) ? ( 'WHERE ' . implode( ' AND ', $where_parts ) ) : '';
+				$prepare_args[] = $pk_col;
+				$prepare_args[] = self::SELECT_BATCH_SIZE;
 
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Dynamic table dump query using validated schema identifiers and integer keyset cursor.
-			$rows = $wpdb->get_results( $query, ARRAY_A );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $where_sql contains only static %i/%s/%d placeholders; all identifiers and values are passed in $prepare_args.
+				$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM %i {$where_sql} ORDER BY %i ASC LIMIT %d", $prepare_args ), ARRAY_A );
+			} else {
+				if ( '' !== $filter['sql'] ) {
+					$where_parts[] = '(' . $filter['sql'] . ')';
+					$prepare_args  = array_merge( $prepare_args, $filter['args'] );
+				}
+				$where_sql      = ! empty( $where_parts ) ? ( 'WHERE ' . implode( ' AND ', $where_parts ) ) : '';
+				$prepare_args[] = (int) $cursor['offset'];
+				$prepare_args[] = self::SELECT_BATCH_SIZE;
+
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $where_sql contains only static %i/%s/%d placeholders; all identifiers and values are passed in $prepare_args.
+				$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM %i {$where_sql} LIMIT %d, %d", $prepare_args ), ARRAY_A );
+			}
 
 			if ( empty( $rows ) ) {
 				$state['db_table_idx']   += 1;
@@ -385,29 +404,70 @@ class LDSM_DB_Exporter {
 	}
 
 	/**
-	 * Build optional WHERE filter clause for core WP tables.
+	 * Build optional parameterized WHERE filter clause for core WordPress tables.
+	 *
+	 * @param string $suffix  Core table suffix without prefix.
+	 * @param array  $options Export options.
+	 * @return array{sql:string,args:array<int,mixed>}
 	 */
 	private static function build_table_filter_clause( $suffix, array $options ) {
+		global $wpdb;
+
 		if ( 'posts' === $suffix && ! empty( $options['exclude_revisions'] ) ) {
-			return "`post_type` != 'revision'";
+			return array(
+				'sql'  => '%i != %s',
+				'args' => array( 'post_type', 'revision' ),
+			);
 		}
 
 		if ( 'comments' === $suffix && ! empty( $options['exclude_spam'] ) ) {
-			return "`comment_approved` NOT IN ('spam', 'trash')";
+			return array(
+				'sql'  => '%i NOT IN (%s, %s)',
+				'args' => array( 'comment_approved', 'spam', 'trash' ),
+			);
 		}
 
 		if ( 'options' === $suffix ) {
-			$conds = array(
-				"`option_name` NOT IN ('ldsm_vault_key', 'ldsm_maintenance_active', 'ldsm_needs_rewrite_flush', 'ldsm_schedule_status', '_transient_ldsm_bg_runner_lock', '_transient_timeout_ldsm_bg_runner_lock')",
+			$skip_opts = array(
+				'ldsm_vault_key',
+				'ldsm_active_jobs',
+				'ldsm_maintenance_active',
+				'ldsm_needs_rewrite_flush',
+				'ldsm_schedule_status',
+				'_transient_ldsm_bg_runner_lock',
+				'_transient_timeout_ldsm_bg_runner_lock',
 			);
+			$in_ph = implode( ', ', array_fill( 0, count( $skip_opts ), '%s' ) );
+			$conds = array(
+				"%i NOT IN ({$in_ph})",
+				'%i NOT LIKE %s',
+			);
+			$args  = array_merge(
+				array( 'option_name' ),
+				$skip_opts,
+				array( 'option_name', $wpdb->esc_like( 'ldsm_job_' ) . '%' )
+			);
+
 			if ( ! empty( $options['exclude_transients'] ) ) {
-				$conds[] = "`option_name` NOT LIKE '\\_transient\\_%'";
-				$conds[] = "`option_name` NOT LIKE '\\_site\\_transient\\_%'";
+				$conds[] = '%i NOT LIKE %s';
+				$args[]  = 'option_name';
+				$args[]  = $wpdb->esc_like( '_transient_' ) . '%';
+
+				$conds[] = '%i NOT LIKE %s';
+				$args[]  = 'option_name';
+				$args[]  = $wpdb->esc_like( '_site_transient_' ) . '%';
 			}
-			return implode( ' AND ', $conds );
+
+			return array(
+				'sql'  => implode( ' AND ', $conds ),
+				'args' => $args,
+			);
 		}
 
-		return '';
+		return array(
+			'sql'  => '',
+			'args' => array(),
+		);
 	}
 
 	/**
@@ -439,14 +499,14 @@ class LDSM_DB_Exporter {
 	}
 
 	/**
-	 * Quote a MySQL identifier with backticks.
+	 * Quote a MySQL identifier with backticks for exported SQL dump statements.
 	 */
 	public static function quote_ident( $ident ) {
 		return '`' . str_replace( '`', '``', (string) $ident ) . '`';
 	}
 
 	/**
-	 * Escape raw string bytes for a single-quoted MySQL string literal.
+	 * Escape raw string bytes for a single-quoted MySQL string literal in exported SQL dump files.
 	 */
 	public static function escape_sql_string( $str ) {
 		return strtr(

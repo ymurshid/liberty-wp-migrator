@@ -2,9 +2,9 @@
 /**
  * Import State-Machine Coordinator — LibertyDev Site Migrator.
  *
- * Restores archives into WordPress's canonically configured directories (supporting relocated
- * uploads, plugins, mu-plugins, themes, and languages) with strict symlink boundary enforcement
- * and PHP-exit-guarded temporary extraction files.
+ * Enforces Multisite Super Admin permissions, restores archives into WordPress's canonically
+ * configured directories with strict symlink boundary enforcement, and stores temporary extraction
+ * metadata and SQL dumps in non-executable protected data files inside the unguessable vault.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -58,7 +58,6 @@ class LDSM_Importer {
 			}
 		}
 
-		// Ensure vault key exists before snapshot so we preserve the destination vault across DB swap.
 		LDSM_Storage::ensure_storage_ready();
 		$dest_vault_key = (string) get_option( 'ldsm_vault_key', '' );
 
@@ -77,6 +76,10 @@ class LDSM_Importer {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function init_upload_job( $filename, $total_size ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Super Admin / Administrator permissions are required to import a site.' );
+		}
+
 		$clean_filename = sanitize_file_name( (string) $filename );
 		if ( '.zip' !== strtolower( substr( $clean_filename, -4 ) ) ) {
 			return new WP_Error( 'invalid_extension', 'Only .zip archives created by LibertyDev Site Migrator are supported.' );
@@ -91,7 +94,7 @@ class LDSM_Importer {
 		}
 
 		$ctx      = self::capture_destination_context();
-		$zip_path = $job['job_dir'] . '/package.zip.php';
+		$zip_path = $job['job_dir'] . '/package.zip';
 
 		$state = array(
 			'job_id'             => $job['job_id'],
@@ -128,6 +131,10 @@ class LDSM_Importer {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function receive_upload_chunk( $job_id, $offset, $tmp_filepath ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Super Admin / Administrator permissions are required to upload site archives.' );
+		}
+
 		$job_dir = LDSM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
 			return $job_dir;
@@ -170,17 +177,13 @@ class LDSM_Importer {
 			return $safe_check;
 		}
 
-		if ( ! LDSM_Storage::ensure_guarded_php_file( $zip_path ) ) {
-			return new WP_Error( 'pkg_guard_failed', 'Cannot initialize PHP-guarded upload package file.' );
-		}
-
-		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming binary chunk assembly at exact offset after PHP guard header.
-		$out = @fopen( $zip_path, 'r+b' );
+		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming binary chunk assembly at exact offset.
+		$out = @fopen( $zip_path, file_exists( $zip_path ) ? 'r+b' : 'w+b' );
 		if ( ! $out ) {
 			return new WP_Error( 'pkg_open_failed', 'Cannot open target upload package for writing.' );
 		}
 
-		if ( 0 !== @fseek( $out, LDSM_Storage::PHP_EXIT_GUARD_LEN + $offset, SEEK_SET ) ) {
+		if ( 0 !== @fseek( $out, $offset, SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $out );
 			return new WP_Error( 'pkg_seek_failed', 'Failed seeking to chunk offset.' );
@@ -226,6 +229,10 @@ class LDSM_Importer {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function init_from_stored_backup( $backup_filename ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Super Admin / Administrator permissions are required to restore backups.' );
+		}
+
 		if ( ! LDSM_Storage::is_valid_backup_filename( $backup_filename ) ) {
 			return new WP_Error( 'invalid_backup', 'Invalid backup filename.' );
 		}
@@ -266,6 +273,10 @@ class LDSM_Importer {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function inspect_package( $job_id ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Insufficient permissions to inspect migration archives.' );
+		}
+
 		$job_dir = LDSM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
 			return $job_dir;
@@ -276,8 +287,8 @@ class LDSM_Importer {
 			return $state;
 		}
 
-		$index_php = $job_dir . '/extract_index.php';
-		$summary   = LDSM_Stream_Zip_Reader::index_archive( (string) $state['zip_path'], $index_php );
+		$index_dat = $job_dir . '/extract_index.dat';
+		$summary   = LDSM_Stream_Zip_Reader::index_archive( (string) $state['zip_path'], $index_dat );
 		if ( is_wp_error( $summary ) ) {
 			LDSM_Storage::delete_job( $job_id );
 			return $summary;
@@ -314,6 +325,10 @@ class LDSM_Importer {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function start_confirmed_import( $job_id, array $import_options ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Super Admin / Administrator permissions are required to execute a site import.' );
+		}
+
 		$state = LDSM_Storage::load_job_state( $job_id );
 		if ( is_wp_error( $state ) ) {
 			return $state;
@@ -322,13 +337,10 @@ class LDSM_Importer {
 			return new WP_Error( 'invalid_confirm_state', 'Archive must be inspected before starting import.' );
 		}
 
-		$existing_sched = get_option( 'ldsm_schedule_settings', null );
-
 		$state['import_options'] = array(
 			'keep_current_admin' => ! empty( $import_options['keep_current_admin'] ),
 			'skip_guid'          => ! empty( $import_options['skip_guid'] ),
 		);
-		$state['saved_dest_schedule'] = $existing_sched;
 
 		$state['phase']                = 'extract_files';
 		$state['db_extracted']         = false;
@@ -357,6 +369,10 @@ class LDSM_Importer {
 	 * @return array<string,mixed>|WP_Error
 	 */
 	public static function run_tick( $job_id ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Super Admin / Administrator permissions are required to continue site import.' );
+		}
+
 		$job_dir = LDSM_Storage::get_job_dir( $job_id );
 		if ( is_wp_error( $job_dir ) ) {
 			delete_option( 'ldsm_maintenance_active' );
@@ -404,15 +420,15 @@ class LDSM_Importer {
 		}
 
 		if ( 'import_db' === $phase ) {
-			$sql_php = $job_dir . '/database.sql.php';
-			$db_res  = LDSM_DB_Importer::import_sql_step( $state, $sql_php, $deadline );
+			$sql_file = $job_dir . '/database.sql';
+			$db_res   = LDSM_DB_Importer::import_sql_step( $state, $sql_file, $deadline );
 			if ( is_wp_error( $db_res ) ) {
 				self::cleanup_failed_import( $job_id, $state );
 				return $db_res;
 			}
 
 			if ( true === $db_res ) {
-				wp_delete_file( $sql_php );
+				wp_delete_file( $sql_file );
 				$state['phase'] = 'search_replace';
 				$pct            = 76;
 			} else {
@@ -476,14 +492,14 @@ class LDSM_Importer {
 
 			$roots     = LDSM_Storage::get_content_roots();
 			$staged_mu = $job_dir . '/staged_mu_plugins';
-			if ( is_dir( $staged_mu ) && ! empty( $roots['mu-plugins'] ) ) {
+			if ( is_dir( $staged_mu ) && ! empty( $roots['mu-plugins'] ) && LDSM_Storage::current_user_can_manage() ) {
 				$target_mu = $roots['mu-plugins'];
 				self::copy_dir_safe_recursive( $staged_mu, $target_mu, $target_mu );
 			}
 
 			// Purge Elementor generated CSS cache dynamically inside the configured uploads folder.
 			$uploads_info = wp_upload_dir( null, false );
-			if ( ! empty( $uploads_info['basedir'] ) ) {
+			if ( empty( $uploads_info['error'] ) && ! empty( $uploads_info['basedir'] ) ) {
 				$elementor_css_dir = LDSM_Storage::normalize_path( $uploads_info['basedir'] ) . '/elementor/css';
 				if ( is_dir( $elementor_css_dir ) && ! is_link( $elementor_css_dir ) ) {
 					$css_files = glob( $elementor_css_dir . '/*.css' );
@@ -532,7 +548,7 @@ class LDSM_Importer {
 	}
 
 	/**
-	 * Extract database.sql (as guarded database.sql.php) and content files in time-boxed batches.
+	 * Extract database.sql (as protected non-executable data file) and site content files in time-boxed batches.
 	 *
 	 * @param string $job_dir  Job directory.
 	 * @param array  $state    Job state (modified by reference).
@@ -540,18 +556,21 @@ class LDSM_Importer {
 	 * @return bool|WP_Error
 	 */
 	private static function extract_step( $job_dir, array &$state, $deadline ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Super Admin / Administrator permissions are required for archive extraction.' );
+		}
+
 		$zip_path = (string) $state['zip_path'];
 
 		if ( empty( $state['db_extracted'] ) ) {
-			$sql_dest = $job_dir . '/database.sql.php';
+			$sql_dest = $job_dir . '/database.sql';
 			$db_res   = LDSM_Stream_Zip_Reader::extract_entry_to_file_chunked(
 				$zip_path,
 				(array) $state['db_entry'],
 				$sql_dest,
 				$job_dir,
 				$state['partial_extract'],
-				$deadline,
-				true
+				$deadline
 			);
 			if ( is_wp_error( $db_res ) ) {
 				return $db_res;
@@ -578,8 +597,7 @@ class LDSM_Importer {
 					$target['dest_path'],
 					$target['allowed_root'],
 					$state['partial_extract'],
-					$deadline,
-					false
+					$deadline
 				);
 				if ( is_wp_error( $p_res ) ) {
 					return $p_res;
@@ -596,27 +614,27 @@ class LDSM_Importer {
 			}
 		}
 
-		$index_php = $job_dir . '/extract_index.php';
-		if ( ! file_exists( $index_php ) ) {
+		$index_dat = $job_dir . '/extract_index.dat';
+		if ( ! file_exists( $index_dat ) ) {
 			return true;
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Streaming byte-offset extraction index cursor across ticks.
-		$fp = @fopen( $index_php, 'rb' );
+		$fp = @fopen( $index_dat, 'rb' );
 		if ( ! $fp ) {
-			return new WP_Error( 'extract_index_open_failed', 'Cannot open guarded extraction index.' );
+			return new WP_Error( 'extract_index_open_failed', 'Cannot open protected extraction index.' );
 		}
 
 		if ( 0 !== @fseek( $fp, (int) $state['extract_index_offset'], SEEK_SET ) ) {
 			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 			fclose( $fp );
-			return new WP_Error( 'extract_index_seek_failed', 'Failed seeking in guarded extraction index.' );
+			return new WP_Error( 'extract_index_seek_failed', 'Failed seeking in protected extraction index.' );
 		}
 
 		while ( ( $line = fgets( $fp ) ) !== false ) {
 			$next_offset = (int) ftell( $fp );
 			$trimmed     = trim( $line );
-			if ( '' === $trimmed || 0 === strpos( $trimmed, '<?php' ) ) {
+			if ( '' === $trimmed ) {
 				$state['extract_index_offset'] = $next_offset;
 				continue;
 			}
@@ -640,8 +658,7 @@ class LDSM_Importer {
 				$target['dest_path'],
 				$target['allowed_root'],
 				$state['partial_extract'],
-				$deadline,
-				false
+				$deadline
 			);
 
 			if ( is_wp_error( $res ) ) {
@@ -736,13 +753,16 @@ class LDSM_Importer {
 	}
 
 	/**
-	 * Recursively copy staged mu-plugins into WPMU_PLUGIN_DIR while blocking symlinks at every segment.
+	 * Recursively copy staged mu-plugins into WPMU_PLUGIN_DIR while enforcing Super Admin capability and blocking symlinks.
 	 *
 	 * @param string $src          Staged source directory.
 	 * @param string $dst          Destination directory.
 	 * @param string $allowed_root Canonical allowed destination root.
 	 */
 	private static function copy_dir_safe_recursive( $src, $dst, $allowed_root ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return;
+		}
 		if ( ! is_dir( $src ) || is_link( $src ) || is_link( $dst ) ) {
 			return;
 		}

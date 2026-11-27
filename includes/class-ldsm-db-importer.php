@@ -1,6 +1,8 @@
 <?php
 /**
  * Time-Boxed Shadow-Table Database Importer, Collation Normalizer & Atomic Swapper — LibertyDev Site Migrator.
+ *
+ * Enforces Multisite Super Admin permissions and parameterizes all dynamic SQL queries via $wpdb->prepare().
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -10,16 +12,25 @@ if ( ! defined( 'ABSPATH' ) ) {
 class LDSM_DB_Importer {
 
 	/**
-	 * Execute a time-boxed step importing SQL statements from PHP-guarded $sql_php_filepath into shadow tables.
+	 * Execute a time-boxed step importing SQL statements from protected $sql_filepath into shadow tables.
+	 *
+	 * @param array  $state        Job state (modified by reference).
+	 * @param string $sql_filepath Path to extracted protected database.sql data file.
+	 * @param float  $deadline     Unix microtime deadline.
+	 * @return bool|WP_Error
 	 */
-	public static function import_sql_step( array &$state, $sql_php_filepath, $deadline ) {
+	public static function import_sql_step( array &$state, $sql_filepath, $deadline ) {
 		global $wpdb;
 
-		if ( ! is_file( $sql_php_filepath ) || is_link( $sql_php_filepath ) || ! is_readable( $sql_php_filepath ) ) {
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Insufficient permissions to import database tables.' );
+		}
+
+		if ( ! is_file( $sql_filepath ) || is_link( $sql_filepath ) || ! is_readable( $sql_filepath ) ) {
 			return new WP_Error( 'sql_missing', 'Extracted database dump file is missing or unreadable.' );
 		}
 
-		$total_sql_bytes = (int) @filesize( $sql_php_filepath );
+		$total_sql_bytes = (int) @filesize( $sql_filepath );
 		if ( ! isset( $state['sql_byte_offset'] ) ) {
 			$state['sql_byte_offset']    = 0;
 			$state['sql_total_bytes']    = max( 1, $total_sql_bytes );
@@ -30,7 +41,7 @@ class LDSM_DB_Importer {
 		}
 
 		// phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-		$fp = @fopen( $sql_php_filepath, 'rb' );
+		$fp = @fopen( $sql_filepath, 'rb' );
 		if ( ! $fp ) {
 			return new WP_Error( 'sql_open_failed', 'Cannot open database dump for reading.' );
 		}
@@ -62,7 +73,7 @@ class LDSM_DB_Importer {
 			}
 
 			$trimmed = trim( $line );
-			if ( '' === $trimmed || 0 === strpos( $trimmed, '<?php' ) ) {
+			if ( '' === $trimmed ) {
 				$state['sql_byte_offset'] = (int) ftell( $fp );
 				continue;
 			}
@@ -152,6 +163,9 @@ class LDSM_DB_Importer {
 			if ( '' !== $source_prefix && $source_prefix !== $dest_prefix ) {
 				$view_sql = str_replace( '`' . $source_prefix, '`' . $dest_prefix, $view_sql );
 			}
+			if ( 0 !== stripos( ltrim( $view_sql ), 'CREATE ' ) ) {
+				return new WP_Error( 'invalid_view_sql', 'Unexpected SQL statement inside create_view frame.' );
+			}
 			$state['deferred_views'][] = array(
 				'view_name' => $final_view,
 				'sql'       => $view_sql,
@@ -180,6 +194,9 @@ class LDSM_DB_Importer {
 			$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $shadow_table ) );
 
 			$rewritten = self::replace_first_table_ident( $sql, $src_table, $shadow_table );
+			if ( 0 !== stripos( ltrim( $rewritten ), 'CREATE TABLE ' ) ) {
+				return new WP_Error( 'invalid_create_sql', 'Unexpected SQL statement inside create_table frame.' );
+			}
 
 			if ( empty( $state['supports_0900'] ) && false !== stripos( $rewritten, 'utf8mb4_0900_' ) ) {
 				$fallback  = (string) $state['fallback_collation'];
@@ -203,7 +220,7 @@ class LDSM_DB_Importer {
 				);
 			}
 
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Executing validated CREATE TABLE statement from site archive into shadow table.
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Executing verified CREATE TABLE DDL from migration archive into isolated shadow table.
 			$res = $wpdb->query( $rewritten );
 			if ( false === $res ) {
 				$no_fk = preg_replace( '/,\s*(?:CONSTRAINT\s+`[^`]+`\s+)?FOREIGN\s+KEY\s*\([^)]+\)\s*REFERENCES\s+`[^`]+`\s*\([^)]+\)(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|SET NULL|RESTRICT|NO ACTION))*/i', '', $rewritten );
@@ -222,7 +239,10 @@ class LDSM_DB_Importer {
 
 		if ( 'insert' === $op ) {
 			$rewritten = self::replace_first_table_ident( $sql, $src_table, $shadow_table );
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Executing framed bulk INSERT statement into isolated shadow table.
+			if ( 0 !== stripos( ltrim( $rewritten ), 'INSERT INTO ' ) ) {
+				return new WP_Error( 'invalid_insert_sql', 'Unexpected SQL statement inside insert frame.' );
+			}
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Executing verified bulk INSERT statement from migration archive into isolated shadow table.
 			$res = $wpdb->query( $rewritten );
 			if ( false === $res ) {
 				return new WP_Error(
@@ -237,10 +257,19 @@ class LDSM_DB_Importer {
 	}
 
 	/**
-	 * Run a time-boxed Serialization-Safe Search & Replace step across all shadow tables.
+	 * Run a time-boxed Serialization-Safe Search & Replace step across all shadow tables using $wpdb->prepare().
+	 *
+	 * @param array         $state    Job state (modified by reference).
+	 * @param LDSM_Replacer $replacer Active URL/path replacer.
+	 * @param float         $deadline Unix microtime deadline.
+	 * @return bool|WP_Error
 	 */
 	public static function search_replace_step( array &$state, LDSM_Replacer $replacer, $deadline ) {
 		global $wpdb;
+
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Insufficient permissions to transform database tables.' );
+		}
 
 		if ( ! $replacer->has_rules() || empty( $state['shadow_list'] ) ) {
 			return true;
@@ -274,29 +303,34 @@ class LDSM_DB_Importer {
 			}
 
 			$cursor    = &$state['sr_table_cursor'];
-			$esc_table = LDSM_DB_Exporter::quote_ident( $shadow_table );
 			$int_pk    = $cursor['int_pk'];
 			$pk_cols   = $cursor['pk_cols'];
 			$text_cols = $cursor['text_cols'];
 
 			$select_cols = array_values( array_unique( array_merge( $pk_cols, $text_cols ) ) );
 			if ( empty( $pk_cols ) ) {
-				$col_sql = '*';
+				$col_placeholders = '*';
+				$col_args         = array();
 			} else {
-				$col_sql = implode( ',', array_map( array( 'LDSM_DB_Exporter', 'quote_ident' ), $select_cols ) );
+				$col_placeholders = implode( ', ', array_fill( 0, count( $select_cols ), '%i' ) );
+				$col_args         = $select_cols;
 			}
 
 			if ( null !== $int_pk ) {
-				$esc_pk = LDSM_DB_Exporter::quote_ident( $int_pk );
-				$where  = ( null !== $cursor['last_pk'] ) ? ( 'WHERE ' . $esc_pk . ' > ' . (int) $cursor['last_pk'] ) : '';
-				$query  = "SELECT {$col_sql} FROM {$esc_table} {$where} ORDER BY {$esc_pk} ASC LIMIT 300";
+				if ( null !== $cursor['last_pk'] ) {
+					$prepare_args = array_merge( $col_args, array( $shadow_table, $int_pk, (int) $cursor['last_pk'], $int_pk, 300 ) );
+					// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $col_placeholders contains only static '*' or '%i' placeholders; all identifiers and bounds are passed in $prepare_args.
+					$rows = $wpdb->get_results( $wpdb->prepare( "SELECT {$col_placeholders} FROM %i WHERE %i > %d ORDER BY %i ASC LIMIT %d", $prepare_args ), ARRAY_A );
+				} else {
+					$prepare_args = array_merge( $col_args, array( $shadow_table, $int_pk, 300 ) );
+					// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $col_placeholders contains only static '*' or '%i' placeholders; all identifiers and bounds are passed in $prepare_args.
+					$rows = $wpdb->get_results( $wpdb->prepare( "SELECT {$col_placeholders} FROM %i ORDER BY %i ASC LIMIT %d", $prepare_args ), ARRAY_A );
+				}
 			} else {
-				$offset = (int) $cursor['offset'];
-				$query  = "SELECT {$col_sql} FROM {$esc_table} LIMIT {$offset}, 200";
+				$prepare_args = array_merge( $col_args, array( $shadow_table, (int) $cursor['offset'], 200 ) );
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $col_placeholders contains only static '*' or '%i' placeholders; all identifiers and bounds are passed in $prepare_args.
+				$rows = $wpdb->get_results( $wpdb->prepare( "SELECT {$col_placeholders} FROM %i LIMIT %d, %d", $prepare_args ), ARRAY_A );
 			}
-
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Keyset pagination over shadow table columns during search & replace.
-			$rows = $wpdb->get_results( $query, ARRAY_A );
 
 			if ( empty( $rows ) ) {
 				$state['sr_table_idx']   += 1;
@@ -345,10 +379,17 @@ class LDSM_DB_Importer {
 	}
 
 	/**
-	 * Finalize shadow tables and atomically RENAME shadow tables into live destination tables.
+	 * Finalize shadow tables and atomically RENAME shadow tables into live destination tables using $wpdb->prepare().
+	 *
+	 * @param array $state Job state (modified by reference).
+	 * @return int|null|WP_Error Preserved admin user ID or null, or WP_Error on failure.
 	 */
 	public static function finalize_and_atomic_swap( array &$state ) {
 		global $wpdb;
+
+		if ( ! LDSM_Storage::current_user_can_manage() ) {
+			return new WP_Error( 'forbidden', 'Insufficient permissions to finalize database import.' );
+		}
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS = 0' );
@@ -400,7 +441,7 @@ class LDSM_DB_Importer {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update( $opt_shadow, array( 'option_value' => $state['dest_info']['home_url'] ), array( 'option_name' => 'home' ) );
 
-			// Preserve destination vault key across DB swap so existing server backups remain accessible!
+			// Preserve destination vault key across DB swap so existing server backups remain accessible.
 			if ( ! empty( $state['dest_vault_key'] ) ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 				$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE `option_name` = %s', $opt_shadow, 'ldsm_vault_key' ) );
@@ -419,6 +460,7 @@ class LDSM_DB_Importer {
 			$active_raw = $wpdb->get_var(
 				$wpdb->prepare( 'SELECT `option_value` FROM %i WHERE `option_name` = %s LIMIT 1', $opt_shadow, 'active_plugins' )
 			);
+			// phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.serialize_unserialize -- Restricted with allowed_classes => false when normalizing WordPress active_plugins option.
 			$active_arr = is_string( $active_raw ) ? @unserialize( $active_raw, array( 'allowed_classes' => false ) ) : array();
 			if ( ! is_array( $active_arr ) ) {
 				$active_arr = array();
@@ -439,17 +481,18 @@ class LDSM_DB_Importer {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->update(
 				$opt_shadow,
-				array( 'option_value' => serialize( $active_arr ) ),
+				array( 'option_value' => maybe_serialize( $active_arr ) ),
 				array( 'option_name' => 'active_plugins' )
 			);
 
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 			$wpdb->query(
 				$wpdb->prepare(
-					'DELETE FROM %i WHERE `option_name` IN (%s, %s)',
+					'DELETE FROM %i WHERE `option_name` IN (%s, %s, %s)',
 					$opt_shadow,
 					'_elementor_global_css',
-					'elementor_css_print_method_cache'
+					'elementor_css_print_method_cache',
+					LDSM_Storage::JOB_INDEX_OPTION
 				)
 			);
 		}
@@ -487,14 +530,15 @@ class LDSM_DB_Importer {
 		$existing_views = $wpdb->get_col( 'SHOW FULL TABLES WHERE Table_type = "VIEW"', 0 );
 		$views_set      = is_array( $existing_views ) ? array_flip( $existing_views ) : array();
 
-		$rename_clauses = array();
-		$old_drops      = array();
-		$idx            = 0;
-		$job_short      = substr( preg_replace( '/[^a-z0-9]/i', '', (string) $state['job_id'] ), -4 );
+		$rename_pairs_sql = array();
+		$rename_args      = array();
+		$old_drop_names   = array();
+		$idx              = 0;
+		$job_short        = substr( preg_replace( '/[^a-z0-9]/i', '', (string) $state['job_id'] ), -4 );
 
 		foreach ( $state['shadow_map'] as $info ) {
-			$shadow = $info['shadow'];
-			$final  = $info['final'];
+			$shadow = (string) $info['shadow'];
+			$final  = (string) $info['final'];
 
 			if ( isset( $views_set[ $final ] ) ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
@@ -502,31 +546,35 @@ class LDSM_DB_Importer {
 			}
 
 			if ( isset( $existing_set[ $final ] ) ) {
-				$old_tmp          = 'ldsmold_' . $job_short . '_' . $idx;
-				$old_drops[]      = LDSM_DB_Exporter::quote_ident( $old_tmp );
-				$rename_clauses[] = LDSM_DB_Exporter::quote_ident( $final ) . ' TO ' . LDSM_DB_Exporter::quote_ident( $old_tmp );
+				$old_tmp            = 'ldsmold_' . $job_short . '_' . $idx;
+				$old_drop_names[]   = $old_tmp;
+				$rename_pairs_sql[] = '%i TO %i';
+				$rename_args[]      = $final;
+				$rename_args[]      = $old_tmp;
 				$idx++;
 			}
 
-			$rename_clauses[] = LDSM_DB_Exporter::quote_ident( $shadow ) . ' TO ' . LDSM_DB_Exporter::quote_ident( $final );
+			$rename_pairs_sql[] = '%i TO %i';
+			$rename_args[]      = $shadow;
+			$rename_args[]      = $final;
 		}
 
-		if ( ! empty( $rename_clauses ) ) {
-			if ( ! empty( $old_drops ) ) {
-				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Dropping internal temporary rotation tables.
-				$wpdb->query( 'DROP TABLE IF EXISTS ' . implode( ', ', $old_drops ) );
+		if ( ! empty( $rename_pairs_sql ) ) {
+			foreach ( $old_drop_names as $old_tmp ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $old_tmp ) );
 			}
 
-			$rename_sql = 'RENAME TABLE ' . implode( ', ', $rename_clauses );
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Atomic RENAME TABLE swap across validated shadow tables.
-			$swap_ok = $wpdb->query( $rename_sql );
+			$rename_clause = implode( ', ', $rename_pairs_sql );
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- $rename_clause contains only static '%i TO %i' placeholders; all table names are passed in $rename_args.
+			$swap_ok = $wpdb->query( $wpdb->prepare( "RENAME TABLE {$rename_clause}", $rename_args ) );
 			if ( false === $swap_ok ) {
 				return new WP_Error( 'atomic_swap_failed', 'Atomic RENAME TABLE failed: ' . $wpdb->last_error );
 			}
 
-			if ( ! empty( $old_drops ) ) {
-				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Dropping rotated old tables after successful swap.
-				$wpdb->query( 'DROP TABLE IF EXISTS ' . implode( ', ', $old_drops ) );
+			foreach ( $old_drop_names as $old_tmp ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
+				$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $old_tmp ) );
 			}
 		}
 
@@ -534,7 +582,7 @@ class LDSM_DB_Importer {
 			foreach ( $state['deferred_views'] as $v ) {
 				// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 				$wpdb->query( $wpdb->prepare( 'DROP VIEW IF EXISTS %i', $v['view_name'] ) );
-				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Recreating validated view definition from archive.
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- Recreating verified CREATE VIEW DDL from archive.
 				$wpdb->query( $v['sql'] );
 			}
 		}
@@ -597,7 +645,7 @@ class LDSM_DB_Importer {
 
 		$cap_key   = $dest_prefix . 'capabilities';
 		$level_key = $dest_prefix . 'user_level';
-		$caps_val  = serialize( array( 'administrator' => true ) );
+		$caps_val  = maybe_serialize( array( 'administrator' => true ) );
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		$has_cap = $wpdb->get_var(
@@ -701,7 +749,7 @@ class LDSM_DB_Importer {
 	}
 
 	/**
-	 * Update modified columns on a single row in $shadow_table.
+	 * Update modified columns on a single row in $shadow_table using $wpdb->update() or fully prepared UPDATE.
 	 */
 	private static function apply_row_update( $shadow_table, array $original_row, array $updates, array $pk_cols ) {
 		global $wpdb;
@@ -716,24 +764,35 @@ class LDSM_DB_Importer {
 			return;
 		}
 
-		$set_parts   = array();
-		$where_parts = array();
+		$set_placeholders   = array();
+		$where_placeholders = array();
+		$prepare_args       = array( $shadow_table );
+
 		foreach ( $updates as $col => $val ) {
-			$set_parts[] = LDSM_DB_Exporter::quote_ident( $col ) . " = '" . LDSM_DB_Exporter::escape_sql_string( (string) $val ) . "'";
+			$set_placeholders[] = '%i = %s';
+			$prepare_args[]     = (string) $col;
+			$prepare_args[]     = (string) $val;
 		}
+
 		foreach ( $original_row as $col => $val ) {
-			$qcol = LDSM_DB_Exporter::quote_ident( $col );
 			if ( null === $val ) {
-				$where_parts[] = "{$qcol} IS NULL";
+				$where_placeholders[] = '%i IS NULL';
+				$prepare_args[]       = (string) $col;
 			} else {
-				$where_parts[] = "{$qcol} = '" . LDSM_DB_Exporter::escape_sql_string( (string) $val ) . "'";
+				$where_placeholders[] = '%i = %s';
+				$prepare_args[]       = (string) $col;
+				$prepare_args[]       = (string) $val;
 			}
 		}
 
-		$esc_table = LDSM_DB_Exporter::quote_ident( $shadow_table );
-		$sql       = "UPDATE {$esc_table} SET " . implode( ', ', $set_parts ) . ' WHERE ' . implode( ' AND ', $where_parts ) . ' LIMIT 1';
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- PK-less custom table fallback update with escaped values.
-		$wpdb->query( $sql );
+		if ( empty( $set_placeholders ) || empty( $where_placeholders ) ) {
+			return;
+		}
+
+		$set_clause   = implode( ', ', $set_placeholders );
+		$where_clause = implode( ' AND ', $where_placeholders );
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- $set_clause and $where_clause contain only static '%i = %s' / '%i IS NULL' placeholders; all identifiers and values are passed in $prepare_args (safe even under NO_BACKSLASH_ESCAPES).
+		$wpdb->query( $wpdb->prepare( "UPDATE %i SET {$set_clause} WHERE {$where_clause} LIMIT 1", $prepare_args ) );
 	}
 
 	/**
